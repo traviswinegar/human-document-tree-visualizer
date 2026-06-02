@@ -70,6 +70,7 @@ const libraryModalEl = document.getElementById("library-modal")!;
 const libraryBackdropEl = document.getElementById("library-backdrop")!;
 const libraryListEl = document.getElementById("library-list")!;
 const libraryCloseEl = document.getElementById("library-close") as HTMLButtonElement;
+const bundleEl = document.getElementById("bundle") as HTMLButtonElement;
 const fileInputEl = document.getElementById("file-input") as HTMLInputElement;
 const dropHintEl = document.getElementById("drop-hint")!;
 const speedEl = document.getElementById("speed") as HTMLInputElement;
@@ -115,6 +116,21 @@ const PIPELINE_LABEL: Record<ResolvedPipeline, string> = {
 let selectedId: string | null = null;
 const neighborIds = new Set<string>();
 
+// --- Edge bundling (Phase 5 #2) --------------------------------------------
+// A cheap, always-available routing aid: instead of drawing every edge as a
+// straight line (which, on a big graph, packs the centre into an unreadable
+// hairball), bow co-routed edges along a shared curve so they read as *trails*
+// that run together and only peel off where they must. This is the "first cut"
+// from PLAN-phase5: pure styling via 3d-force-graph's linkCurvature /
+// linkCurveRotation accessors — no geometry rebuild, fully reversible, off by
+// default. Each edge gets a stamped curvature (`__curv`) and a rotation angle
+// (`__rot`) keyed by the structural *region* (nearest section/paragraph
+// ancestor) of its endpoints, so edges inside one region share a bow and
+// cross-region edges fan onto their own arcs. Straight rendering is restored by
+// simply returning 0 when the toggle is off.
+type CurvedEdge = GraphEdge & { __curv?: number; __rot?: number };
+let bundleEdges = false;
+
 const graph = new ForceGraph3D(container, { controlType: "orbit" })
   .width(window.innerWidth)
   .height(window.innerHeight)
@@ -159,6 +175,12 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
   .linkDirectionalParticles((l) => (asLink(l).provenance === "semantic" ? 2 : 0))
   .linkDirectionalParticleSpeed(0.006)
   .linkDirectionalParticleWidth(1.4)
+  // Edge bundling (Phase 5 #2). When off, every edge is a straight line (curvature
+  // 0). When on, each edge bows along the curve stamped by applyBundling(); the
+  // rotation angle spreads the bow around the source→target axis so co-routed
+  // edges fan into a trail instead of overlapping into one fat line.
+  .linkCurvature((l) => (bundleEdges ? ((asLink(l) as CurvedEdge).__curv ?? 0) : 0))
+  .linkCurveRotation((l) => (bundleEdges ? ((asLink(l) as CurvedEdge).__rot ?? 0) : 0))
   // D1 fluidity: every graphData() during the streamed build reheats the force
   // sim, so on a large doc the layout was thrashing. A touch more friction calms
   // the jitter and a finite cooldown lets it settle instead of running forever;
@@ -291,6 +313,112 @@ function applyLayout(mode: LayoutMode): void {
 }
 
 layoutEl.addEventListener("change", () => applyLayout(layoutEl.value as LayoutMode));
+
+// --- Edge bundling: region keying + curve stamping -------------------------
+// FNV-1a over the region key → a stable angle in [0, 2π). Same key always maps
+// to the same rotation, so every edge that shares a region bows the *same* way
+// (they nest into one trail); different regions get different, well-spread
+// angles so their trails peel apart instead of overlapping.
+function hashAngle(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return ((h >>> 0) / 0xffffffff) * Math.PI * 2;
+}
+
+// Stamp every edge with a curvature + rotation keyed by the structural region of
+// its endpoints, then tell 3d-force-graph to re-read the accessors. "Region" =
+// the nearest section/paragraph ancestor (layer ≤ 1), found by walking `part_of`
+// up the containment tree; edges whose endpoints share a region bow gently
+// together, cross-region edges arc wider onto their own trail, and the spine
+// itself (part_of / precedes) stays straight so the document's backbone reads
+// cleanly under the bundled cross-links.
+function applyBundling(): void {
+  const data = graph.graphData();
+
+  // node id → structural layer (depth). Unknown kinds fall to the deepest band.
+  const layerById = new Map<string, number>();
+  for (const ro of data.nodes) {
+    const n = asNode(ro);
+    layerById.set(n.id, KIND_LAYER[n.kind] ?? MAX_LAYER);
+  }
+
+  // child → parent from `part_of` edges: the parent is the shallower-layer
+  // endpoint (containment points deep→shallow). This is the tree we climb to
+  // find a node's region.
+  const parent = new Map<string, string>();
+  for (const ro of data.links) {
+    const e = asLink(ro);
+    if (e.kind !== "part_of") continue;
+    const s = idOf(e.source);
+    const t = idOf(e.target);
+    const ls = layerById.get(s) ?? MAX_LAYER;
+    const lt = layerById.get(t) ?? MAX_LAYER;
+    // Map the deeper node to the shallower one as its parent.
+    if (ls >= lt) parent.set(s, t);
+    else parent.set(t, s);
+  }
+
+  // Walk up to the nearest section/paragraph (layer ≤ 1), memoized. Capped at 32
+  // hops so a malformed/cyclic containment chain can never spin forever.
+  const regionCache = new Map<string, string>();
+  const regionOf = (id: string): string => {
+    const cached = regionCache.get(id);
+    if (cached !== undefined) return cached;
+    let cur = id;
+    for (let hops = 0; hops < 32; hops++) {
+      if ((layerById.get(cur) ?? MAX_LAYER) <= 1) break;
+      const up = parent.get(cur);
+      if (up === undefined || up === cur) break;
+      cur = up;
+    }
+    regionCache.set(id, cur);
+    return cur;
+  };
+
+  for (const ro of data.links) {
+    const e = asLink(ro) as CurvedEdge;
+    // The deterministic backbone stays straight — it's the spine you read along.
+    if (e.kind === "part_of" || e.kind === "precedes") {
+      e.__curv = 0;
+      e.__rot = 0;
+      continue;
+    }
+    const rs = regionOf(idOf(e.source));
+    const rt = regionOf(idOf(e.target));
+    if (rs === rt) {
+      // Within one region: a gentle shared bow keyed by that region.
+      e.__curv = 0.12;
+      e.__rot = hashAngle(rs);
+    } else {
+      // Across regions: a wider arc keyed by the unordered region pair, so the
+      // A↔B trail is one consistent bundle regardless of edge direction.
+      e.__curv = 0.32;
+      e.__rot = hashAngle(rs < rt ? `${rs} ${rt}` : `${rt} ${rs}`);
+    }
+  }
+
+  // Re-assigning the accessors forces 3d-force-graph to re-evaluate curvature /
+  // rotation for the freshly stamped edges.
+  graph.linkCurvature(graph.linkCurvature()).linkCurveRotation(graph.linkCurveRotation());
+}
+
+// Toggle bundling on/off: stamp + reflect button state when turning on; just
+// re-straighten (re-read accessors, which now return 0) when turning off.
+function setBundling(on: boolean): void {
+  bundleEdges = on;
+  bundleEl.classList.toggle("active", on);
+  bundleEl.setAttribute("aria-pressed", on ? "true" : "false");
+  if (on) {
+    applyBundling();
+  } else {
+    graph.linkCurvature(graph.linkCurvature()).linkCurveRotation(graph.linkCurveRotation());
+  }
+}
+
+bundleEl.addEventListener("click", () => setBundling(!bundleEdges));
 
 // --- Bloom glow ------------------------------------------------------------
 // The single biggest "the graph is so dark" lever: an UnrealBloom pass makes the
@@ -1099,6 +1227,9 @@ function startBuild(source: BuildSource): void {
       const now = performance.now();
       if (done) {
         flushApply(); // make sure the final batch is on screen before framing it
+        // Bundling is keyed by the whole containment tree, so (re)stamp it once
+        // the full spine has landed rather than per-batch during the stream.
+        if (bundleEdges) applyBundling();
         graph.zoomToFit(800, 80);
         lastFitAt = now;
         // Pure structural path: this is the total. (When a model-backed delta is
@@ -1135,6 +1266,9 @@ function startBuild(source: BuildSource): void {
           source.edgeCount += delta.edgeCount;
           statsEl.textContent = `${source.nodeCount} nodes · ${source.edgeCount} edges (${source.origin})`;
           applyForceTuning(source.nodeCount); // re-size the field for the grown graph
+          // The semantic/similarity overlay just landed — re-stamp so the new
+          // cross-links join the bundles instead of cutting straight across.
+          if (bundleEdges) applyBundling();
         }
       })
       .catch((err) => console.error("semantic delta failed:", err))
@@ -1448,6 +1582,10 @@ function restoreSavedDoc(doc: SavedDoc): void {
   buildBarFillEl.style.width = "100%";
   buildProgressEl.textContent = "saved";
   playPauseEl.textContent = ICON_REPLAY;
+
+  // Re-stamp curves for the restored graph if bundling is on (the toggle state
+  // is preserved across opens; the freshly ingested edges need stamping).
+  if (bundleEdges) applyBundling();
 
   graph.zoomToFit(800, 80);
 }

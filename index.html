@@ -271,6 +271,12 @@
         border-color: #7aa2ff;
         background: rgba(26, 38, 64, 0.9);
       }
+      /* A toggle button (e.g. Bundle) reads as engaged when active. */
+      #controls button.active {
+        border-color: #7aa2ff;
+        background: rgba(122, 162, 255, 0.22);
+        color: #eaf2ff;
+      }
       #open-doc {
         font-weight: 600;
       }
@@ -801,6 +807,14 @@
         <option value="force2d">Force · 2D map</option>
         <option value="layers">Layers · by structure</option>
       </select>
+      <button
+        id="bundle"
+        type="button"
+        title="Bundle edges into trails (curved routing by structure)"
+        aria-pressed="false"
+      >
+        Bundle
+      </button>
       <input
         id="search"
         type="search"
