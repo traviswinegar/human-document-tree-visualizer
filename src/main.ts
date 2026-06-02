@@ -1,5 +1,8 @@
 import ForceGraph3D from "3d-force-graph";
 import type { NodeObject, LinkObject } from "3d-force-graph";
+import { Vector2 } from "three";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import type { GraphNode, GraphEdge, NodeKind, Provenance } from "./types";
 import { nodeColor, nodeSize, edgeColor } from "./colors";
 import { buildSequence, createBuildPlayer, type BuildPlayer } from "./build-player";
@@ -86,21 +89,23 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
     const g = asNode(n);
     const base = nodeColor(g.kind);
     if (!highlightActive()) return base;
-    return isNodeLit(g.id) ? base : withAlpha(base, 0.06);
+    // Dimmed context keeps a faint floor (was 0.06 — so low it vanished on a big
+    // graph) so you can still read the surrounding shape while the matches glow.
+    return isNodeLit(g.id) ? base : withAlpha(base, 0.16);
   })
   .nodeVal((n) => nodeSize(asNode(n).kind))
   .nodeLabel((n) => {
     const g = asNode(n);
     return `<b>${g.label}</b><br/><span style="opacity:.7">${g.kind}</span>`;
   })
-  .nodeOpacity(0.95)
+  .nodeOpacity(1)
   .onNodeClick((n) => selectNode(n))
   .onBackgroundClick(() => clearSelection())
   .linkColor((l) => {
     const e = asLink(l);
     const base = edgeColor(e.kind);
     if (!highlightActive()) return base;
-    return isLinkLit(e) ? base : withAlpha(base, 0.04);
+    return isLinkLit(e) ? base : withAlpha(base, 0.08);
   })
   // Incident edges of the selected node thicken so the local neighborhood reads
   // as a unit; otherwise semantic edges stay slightly bolder than structural.
@@ -124,6 +129,29 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
   .d3VelocityDecay(0.45)
   .cooldownTime(12000)
   .warmupTicks(0);
+
+// --- Bloom glow ------------------------------------------------------------
+// The single biggest "the graph is so dark" lever: an UnrealBloom pass makes the
+// bright node spheres bleed light against the near-black background, so the graph
+// reads as a luminous nebula instead of flat dots. 3d-force-graph builds its
+// post-processing composer with just a RenderPass; we append bloom, then an
+// OutputPass to do the final sRGB/tone-map conversion (bloom must run in linear
+// space *before* that). The ESM 3d-force-graph externalises `three`, so these
+// addon passes share the one `three` instance the composer renders with.
+// Tunables — bump STRENGTH for more glow, lower THRESHOLD to make dimmer nodes
+// (and edges) bloom too:
+const BLOOM_STRENGTH = 0.85; // intensity of the glow
+const BLOOM_RADIUS = 0.55; // how far the glow spreads
+const BLOOM_THRESHOLD = 0.08; // luminance above which a pixel blooms (low → most nodes glow)
+const bloomPass = new UnrealBloomPass(
+  new Vector2(window.innerWidth, window.innerHeight),
+  BLOOM_STRENGTH,
+  BLOOM_RADIUS,
+  BLOOM_THRESHOLD
+);
+const composer = graph.postProcessingComposer();
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());
 
 // Re-assigning the accessors is how 3d-force-graph is told to re-evaluate node /
 // link materials after the highlight state changes.
