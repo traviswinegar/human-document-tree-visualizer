@@ -86,11 +86,21 @@ Cargo **workspace** at repo root:
 | B4 | 5 | Embeddings → similarity edges + search (vectordb, gated separately) | similarity edges added; search works |
 | B5 | 6 | Document-type detection runtime gate (classify → route to narrative) | classifies narrative vs not on fixtures; routes |
 | C1 | 4 ✓ | Browser walker via WASM (public web build) + runtime document upload (Open button / drag-drop) + floating-chip build progress | public web build walks via WASM with the *same* engine as desktop; user swaps the document at runtime → fresh streamed build |
+| D1 | 4 ✓ | "Keep it fluid" — fix large-doc build stutter (force tuning + LOD-throttled apply) | large doc builds to completion without frame-drops; final state always lands |
+| D2 | 4 ✓ | Click node → highlight it, its edges and immediate neighbours (dim the rest) | selection lights node+neighbours+incident edges; bg-click/Esc clears |
+| D3 | 4 ✓ | Right sidebar: the document unfolds (reconstructed from revealed heading/sentence nodes) as it's assimilated | text appears in step with the build, in document order; canvas yields width |
+| D4 | 4 ✓ | Click node → jump to/highlight its text in the sidebar + a details panel (kind, provenance, text, connections) | click ↔ text two-way; connections navigate; panel clears on deselect |
 
 Interleave: kick the long CUDA compile (B1) in the background early; do Stream A
 while it compiles. **Stream C** (public-web/WASM + upload UX) was added mid-run
 on user direction ("host it for the public … should work in Desktop as well");
-C1 is complete.
+C1 is complete. **Stream D** (explorer UX: fluidity + click-highlight + unfolding
+document sidebar + jump-to-text/details) was added mid-run on user direction
+(2026-06-02: "Keep it fluid. Also … 1. Clicking a node should highlight it, its
+edges, and its neighbors 2. … the entire document … in a righthand sidebar as
+it's assimilated 3. … clicking on a node should highlight it in the text … a
+details window"); D1–D4 are complete (frontend-only, default build stays
+native-free).
 
 ---
 
@@ -113,8 +123,19 @@ grammar actually compiles (watch the ~5-alternative ceiling on `nodekind`/
 > the desktop walker) and the user can replace the document at runtime (Open
 > button / drag-drop) — each new doc tears down the running build and streams a
 > fresh one, with playback collapsed into a faint floating chip so it never
-> competes with the animation. Verified live (see C1 entry below). B2 remains the
-> next *build-order* step, but the user is now interactively testing C1.
+> competes with the animation. Verified live (see C1 entry below).
+
+> **Stream D (D1–D4) landed next (2026-06-02), on user direction.** The frontend
+> is now a real explorer: large-doc builds stay fluid (coalesced, LOD-throttled
+> `graphData()` applies + force friction — D1); clicking a node lights it, its
+> incident edges and immediate neighbours while the rest dim (D2); the document
+> re-unfolds in a right sidebar *in step with the build*, reconstructed in
+> document order from the revealed heading/sentence nodes (D3); and clicking a
+> node both jumps to/highlights its text in the sidebar and opens a details panel
+> (kind, provenance, text, navigable connections), with the text→node direction
+> wired too (D4). All four are frontend-only — the default build is still
+> native-free. Verified live via dev handles (see D1–D4 entries below). **B2
+> remains the next *build-order* step.**
 
 > **User direction (2026-06-02, to discuss in the morning):** build the *full*
 > pipeline for **both** the LLM path **and** the deterministic "Tier 1" path so
@@ -161,6 +182,15 @@ grammar actually compiles (watch the ~5-alternative ceiling on `nodekind`/
   - **upload UI + chip.** Commit `0ba7000` · src `src/main.ts` (rebuildable `startBuild`/`loadAndBuild`/`ingestFile`; Open-button → hidden file input; window-wide drag-drop with depth-counted hint; chip wires `playpause`/`replay` once against a re-pointed module `player`; progress bar fill + icon swap), `index.html` (`#open-doc`, hidden `#file-input`, `#playback` floating chip with `#build-bar`, `#drop-hint` overlay).
   - Verified: `npx tsc --noEmit` clean; `npm run build` clean (wasm rebuilt, tsc, vite — wasm code-split into its own 183 KB chunk, `dist/` emitted). Runtime confirmed live via preview dev handles (`__doctreeSource`): initial load walks via **WASM** (`origin "wasm-walk"`, 54 nodes/145 edges/199 steps, build streams in); a **dropped document** re-ingests (`wasm-walk`, 8/12/20, distinct counts) — old build torn down, fresh one streamed; build completes → bar 100 %, progress "ready", play/pause shows the replay glyph (⟳); the chip's **replay** click resets to 0/20 and regrows. Zero console warnings/errors.
   - Note: `preview_screenshot` again times out against the continuously-animating WebGL canvas (the documented rAF-loop tooling limitation) — render verified by dev-handle introspection instead, as with A5–A8.
+- **D1** — keep large-doc builds fluid (coalesced apply + force tuning).
+  Commit `c97c80b` · test `npx tsc --noEmit` + `npx vite build` (both exit 0); runtime verified via dev handles: default build (54 nodes, apply interval 0) completes cleanly; a synthetic 403-node / 3685-edge / 4088-step doc drives to full completion with the entire final state on screen and "ready" reached (trailing `flushApply` lands the final batch) · src `src/main.ts` (`applyIntervalForSize`, `cancelPendingApply`, `commit`/`flushApply` trailing-throttle in `startBuild`; `.d3VelocityDecay(0.45)`/`.cooldownTime(12000)`/`.warmupTicks(0)` on the graph).
+  Root cause: every `graph.graphData()` reheats the force sim, so re-applying on every revealed batch thrashed layout as node count climbed. Fix coalesces `graphData()` into a node-count-scaled minimum interval.
+- **D2** — click a node to highlight it, its edges and neighbours.
+  Commit `e20a7e0` · test `npx tsc --noEmit` + `npx vite build` (both exit 0); runtime verified via `__doctreeSelect`: selecting `sent:1` keeps it + its 3 neighbours full-colour while a non-neighbour drops to 0.06 alpha and incident edges widen 0.4→2; Escape/background-click restore full colour/width · src `src/main.ts` (`selectNode`/`clearSelection`, `highlightActive`/`isNodeLit`/`isLinkLit`, highlight-aware `linkWidth`, `onBackgroundClick`, Escape handler). Selection unions with search through the same dimming channel.
+- **D3** — right sidebar where the document unfolds as it's assimilated.
+  Commit `423352f` · test `npx tsc --noEmit` + `npx vite build` (both exit 0); runtime verified: sample narrative reconstructs as 1 heading + 5 paragraphs + 15 ordered sentences with stable `data-node-id`s; canvas width tracks the sidebar (920 open / 1280 collapsed) and collapse/reopen toggles cleanly · src `src/main.ts` (`renderSidebar` — sections+sentences tiled, sentences grouped into paragraphs by span containment with an ordered fallback; `layoutGraph`/`setSidebar`; `renderSidebar` called from `commit`), `index.html` (`#sidebar`/`#sidebar-doc`/`#node-details` + styles). Only sentence/section nodes carry usable text+span (clauses/quotes/refs are sub-spans inside sentences ⇒ excluded; walker `walker.rs:73-167`).
+- **D4** — click a node to jump to its text + open a details panel.
+  Commit `159a6b6` · test `npx tsc --noEmit` + `npx vite build` (both exit 0); runtime verified via `__doctreeSelect`: selecting `sent:1` highlights its line and lists mentions/part_of/precedes; selecting `term:charts` (no own line) lights its neighbour sentence and lists co_occurs_with/mentions; clicking a connection navigates to `term:cove` and re-highlights its sentences; background-click hides the panel and clears the text highlight; zero console errors · src `src/main.ts` (`jumpToNode`/`clearDocActive`, `showDetails`/`hideDetails`, `PROV_META`, `selectNodeById`, delegated click wiring on `#sidebar-doc`/`#node-details`).
 
 ---
 
