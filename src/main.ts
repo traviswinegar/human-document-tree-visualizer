@@ -36,6 +36,9 @@ const openDocEl = document.getElementById("open-doc") as HTMLButtonElement;
 const fileInputEl = document.getElementById("file-input") as HTMLInputElement;
 const dropHintEl = document.getElementById("drop-hint")!;
 const speedEl = document.getElementById("speed") as HTMLInputElement;
+const sidebarDocEl = document.getElementById("sidebar-doc")!;
+const sidebarCollapseEl = document.getElementById("sidebar-collapse") as HTMLButtonElement;
+const sidebarReopenEl = document.getElementById("sidebar-reopen") as HTMLButtonElement;
 
 // Search/highlight state. When a search is active, matched nodes keep full color
 // and the rest dim out, so a query reads as "light up the matches" against the
@@ -165,6 +168,84 @@ function clearSelection(): void {
   refresh();
 }
 
+// --- D3: sidebar document reconstruction ------------------------------------
+const esc = (s: string): string =>
+  s.replace(
+    /[&<>"]/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c
+  );
+
+const byStart = (a: GraphNode, b: GraphNode): number =>
+  (a.span?.start ?? 0) - (b.span?.start ?? 0);
+
+// Rebuild the unfolding document from the text-bearing nodes revealed so far.
+// Only sections (headings) and sentences tile the source cleanly — clauses,
+// quotes and references are sub-spans *inside* sentences and would duplicate
+// text, so they're left out here. Sentences are grouped into their paragraph by
+// span containment (the live walker stamps paragraphs with byte spans); any
+// sentence not contained by a revealed paragraph — e.g. the hand-authored
+// fixture, whose paragraphs carry no span — falls back into one ordered block.
+// Rebuilt on every (throttled) commit, so the text grows in step with the graph.
+function renderSidebar(nodes: GraphNode[]): void {
+  const hasSpan = (n: GraphNode): boolean => !!n.span && typeof n.span.start === "number";
+  const sections = nodes.filter((n) => n.kind === "section" && hasSpan(n));
+  const paragraphs = nodes.filter((n) => n.kind === "paragraph" && hasSpan(n));
+  const sentences = nodes
+    .filter((n) => n.kind === "sentence" && hasSpan(n) && !!n.text)
+    .sort(byStart);
+
+  const paraOf = new Map<string, GraphNode[]>();
+  for (const p of paragraphs) paraOf.set(p.id, []);
+  const orphans: GraphNode[] = [];
+  for (const se of sentences) {
+    const s = se.span!.start;
+    const p = paragraphs.find((pp) => s >= pp.span!.start && s < pp.span!.end);
+    if (p) paraOf.get(p.id)!.push(se);
+    else orphans.push(se);
+  }
+
+  type Block =
+    | { start: number; type: "section"; node: GraphNode }
+    | { start: number; type: "para"; sentences: GraphNode[] };
+  const blocks: Block[] = [];
+  for (const sec of sections) blocks.push({ start: sec.span!.start, type: "section", node: sec });
+  for (const p of paragraphs)
+    blocks.push({ start: p.span!.start, type: "para", sentences: paraOf.get(p.id)! });
+  if (orphans.length)
+    blocks.push({ start: orphans[0].span!.start, type: "para", sentences: orphans });
+  blocks.sort((a, b) => a.start - b.start);
+
+  let html = "";
+  for (const b of blocks) {
+    if (b.type === "section") {
+      html += `<h3 class="doc-section" data-node-id="${esc(b.node.id)}">${esc(b.node.label)}</h3>`;
+    } else {
+      if (b.sentences.length === 0) continue;
+      html += `<p class="doc-para">`;
+      for (const se of b.sentences)
+        html += `<span class="doc-sentence" data-node-id="${esc(se.id)}">${esc(se.text!)}</span> `;
+      html += `</p>`;
+    }
+  }
+  sidebarDocEl.innerHTML = html || '<div class="doc-empty">…</div>';
+}
+
+// --- D3: layout — the 3D canvas yields width to the sidebar -----------------
+const SIDEBAR_W = 360;
+let sidebarOpen = true;
+
+function layoutGraph(): void {
+  const w = sidebarOpen ? window.innerWidth - SIDEBAR_W : window.innerWidth;
+  graph.width(Math.max(320, w)).height(window.innerHeight);
+}
+
+function setSidebar(open: boolean): void {
+  sidebarOpen = open;
+  document.body.classList.toggle("sidebar-collapsed", !open);
+  layoutGraph();
+  graph.zoomToFit(600, 80);
+}
+
 function runSearch(): void {
   const q = searchEl.value.trim().toLowerCase();
   searchActive = q.length > 0;
@@ -216,9 +297,13 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") clearSelection();
 });
 
-window.addEventListener("resize", () => {
-  graph.width(window.innerWidth).height(window.innerHeight);
-});
+// Sidebar collapse/reopen; the graph re-fits into the reclaimed/yielded width.
+sidebarCollapseEl.addEventListener("click", () => setSidebar(false));
+sidebarReopenEl.addEventListener("click", () => setSidebar(true));
+
+window.addEventListener("resize", layoutGraph);
+// Narrow the canvas for the sidebar (open by default) before the first build.
+layoutGraph();
 
 // --- A8 / C1: animated build from a live source, with re-ingest -------------
 // A "source" is resolved asynchronously and is origin-agnostic: in the Tauri
@@ -287,6 +372,7 @@ function startBuild(source: BuildSource): void {
   cancelPendingApply = null;
   clearSearch();
   graph.graphData({ nodes: [], links: [] });
+  sidebarDocEl.innerHTML = '<div class="doc-empty">building…</div>';
   statsEl.textContent = `${source.nodeCount} nodes · ${source.edgeCount} edges (${source.origin})`;
 
   // D1 — coalesced apply. commit() is the single point that writes the revealed
@@ -304,6 +390,7 @@ function startBuild(source: BuildSource): void {
       nodes: nodes as unknown as NodeObject[],
       links: edges as unknown as LinkObject[],
     });
+    renderSidebar(nodes); // D3 — unfold the document in step with the graph
   };
   const flushApply = (): void => {
     if (trailingTimer !== null) {
