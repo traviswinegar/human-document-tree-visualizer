@@ -625,6 +625,65 @@
         color: #ffd9d9;
       }
 
+      /* Phase 7 #4 — reconstruct modal. Reuses the library modal's centered
+         panel + backdrop chrome; adds a stats line and a monospace scroll area
+         for the recovered document text. */
+      #reconstruct-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 30;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #reconstruct-modal .lib-panel {
+        width: min(720px, calc(100vw - 48px));
+      }
+      #reconstruct-meta {
+        padding: 10px 16px;
+        border-bottom: 1px solid #1d2740;
+        font-size: 12.5px;
+        color: #b9c8e6;
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+        align-items: baseline;
+      }
+      #reconstruct-meta .rc-verdict {
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      #reconstruct-meta .rc-ok {
+        color: #8ad0a8;
+      }
+      #reconstruct-meta .rc-bad {
+        color: #ff8a8a;
+      }
+      #reconstruct-meta .rc-stat {
+        font-variant-numeric: tabular-nums;
+      }
+      #reconstruct-meta .rc-stat .k {
+        color: #9bb0d6;
+        margin-right: 4px;
+      }
+      #reconstruct-meta .rc-stat .v {
+        color: #eaf2ff;
+        font-weight: 600;
+      }
+      #reconstruct-text {
+        margin: 0;
+        overflow: auto;
+        max-height: min(56vh, 560px);
+        padding: 14px 16px 20px;
+        font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+        font-size: 12.5px;
+        line-height: 1.6;
+        color: #cdd9f0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        tab-size: 4;
+      }
+
       /* Right sidebar (D3): the document text unfolds here, sentence by sentence,
          as the matching nodes are assimilated into the graph. The 3D canvas is
          narrowed to leave room for it (see layoutGraph in main.ts). */
@@ -906,6 +965,7 @@
       <button id="library" type="button" title="Open the saved-graph library">Library</button>
       <button id="export-doc" type="button" title="Download this graph as a portable .doctree.json">Export</button>
       <button id="import-doc" type="button" title="Import a .doctree.json graph file">Import</button>
+      <button id="reconstruct" type="button" title="Reconstruct the original document from the graph via the reversible tokenizer">Reconstruct</button>
       <button id="open-doc" type="button">Open document</button>
       <button id="reset" type="button">Reset view</button>
     </div>
@@ -949,6 +1009,23 @@
           <button id="library-close" type="button" title="Close (Esc)" aria-label="Close">×</button>
         </div>
         <div id="library-list" class="lib-list"></div>
+      </div>
+    </div>
+    <!-- Phase 7 #4 (ADR-00013): the reversible-tokenizer reconstruct panel.
+         The "Reconstruct" button encodes (current document, current graph) into
+         the integer-id token stream and projects it back to the byte-exact
+         original document; this modal shows that recovered text, a byte-exact
+         verdict, and the research stat (tokens vs. document bytes). Same engine
+         on desktop (Tauri command) and web (WASM). -->
+    <div id="reconstruct-modal" class="hidden">
+      <div class="lib-backdrop" id="reconstruct-backdrop"></div>
+      <div class="lib-panel" role="dialog" aria-label="Reconstructed document">
+        <div class="lib-header">
+          <span class="lib-title">Reconstructed document</span>
+          <button id="reconstruct-close" type="button" title="Close (Esc)" aria-label="Close">×</button>
+        </div>
+        <div id="reconstruct-meta"></div>
+        <pre id="reconstruct-text"></pre>
       </div>
     </div>
     <aside id="sidebar">

@@ -12,9 +12,11 @@ import { detectCommunities, clusterForce } from "./clustering";
 import {
   loadBuildSource,
   searchByMeaning,
+  reconstructDocument,
   defaultDocument,
   type BuildSource,
   type ResolvedPipeline,
+  type ReconstructResult,
 } from "./doc-source";
 import {
   saveDoc,
@@ -69,6 +71,12 @@ const saveDocEl = document.getElementById("save-doc") as HTMLButtonElement;
 const libraryEl = document.getElementById("library") as HTMLButtonElement;
 const exportDocEl = document.getElementById("export-doc") as HTMLButtonElement;
 const importDocEl = document.getElementById("import-doc") as HTMLButtonElement;
+const reconstructEl = document.getElementById("reconstruct") as HTMLButtonElement;
+const reconstructModalEl = document.getElementById("reconstruct-modal")!;
+const reconstructBackdropEl = document.getElementById("reconstruct-backdrop")!;
+const reconstructCloseEl = document.getElementById("reconstruct-close") as HTMLButtonElement;
+const reconstructMetaEl = document.getElementById("reconstruct-meta")!;
+const reconstructTextEl = document.getElementById("reconstruct-text")!;
 const importInputEl = document.getElementById("import-input") as HTMLInputElement;
 const libraryModalEl = document.getElementById("library-modal")!;
 const libraryBackdropEl = document.getElementById("library-backdrop")!;
@@ -1701,6 +1709,59 @@ async function doImport(file: File): Promise<void> {
   }
 }
 
+// Phase 7 #4 (ADR-00013) — the "Reconstruct document" button. Encode the live
+// (document, graph) pair into the reversible integer-id token stream and project
+// it back to the byte-exact original document, then show the recovered text, the
+// byte-exact verdict, and the research stat (tokens vs. document bytes). Same
+// engine both ways: native Tauri command on desktop, the identical doctree-core
+// tokenizer compiled to WASM in the browser. The graph is snapshot to a clean,
+// schema-shaped DTO (force-graph runtime props stripped, edge endpoints resolved
+// to id strings) so it deserializes into the Rust `Graph` cleanly.
+function openReconstructModal(): void {
+  reconstructModalEl.classList.remove("hidden");
+}
+function closeReconstructModal(): void {
+  reconstructModalEl.classList.add("hidden");
+}
+
+async function doReconstruct(): Promise<void> {
+  if (graph.graphData().nodes.length === 0) {
+    flashButton(reconstructEl, "nothing yet", "Reconstruct");
+    return;
+  }
+  reconstructEl.disabled = true;
+  try {
+    const snap = snapshotGraph();
+    const result: ReconstructResult = await reconstructDocument(currentText, {
+      nodes: snap.nodes,
+      edges: snap.edges,
+    });
+    renderReconstruct(result);
+    openReconstructModal();
+  } catch (err) {
+    console.error("reconstruct failed:", err);
+    flashButton(reconstructEl, "failed", "Reconstruct");
+  } finally {
+    reconstructEl.disabled = false;
+  }
+}
+
+// Paint the reconstruct result into the modal: a byte-exact verdict pill, the
+// token/byte research stat, and the recovered document text verbatim.
+function renderReconstruct(r: ReconstructResult): void {
+  const verdict = r.byteExact
+    ? `<span class="rc-verdict rc-ok">byte-exact ✓</span>`
+    : `<span class="rc-verdict rc-bad">not byte-exact ✗</span>`;
+  const ratio = r.docBytes > 0 ? (r.tokens / r.docBytes).toFixed(2) : "—";
+  reconstructMetaEl.innerHTML =
+    verdict +
+    `<span class="rc-stat"><span class="k">tokens</span><span class="v">${r.tokens.toLocaleString()}</span></span>` +
+    `<span class="rc-stat"><span class="k">doc bytes</span><span class="v">${r.docBytes.toLocaleString()}</span></span>` +
+    `<span class="rc-stat"><span class="k">tokens/byte</span><span class="v">${ratio}</span></span>` +
+    `<span class="rc-stat"><span class="k">vocab</span><span class="v">${r.vocabSize.toLocaleString()}</span></span>`;
+  reconstructTextEl.textContent = r.text;
+}
+
 // Restore a saved graph into the scene with no re-walk and no re-simulation: feed
 // the stored nodes/edges straight in, seed each node's saved position, and freeze
 // the force sim (cooldownTicks 0) so the layout lands exactly as saved. Switching
@@ -1982,6 +2043,9 @@ importInputEl.addEventListener("change", () => {
   if (file) void doImport(file);
   importInputEl.value = ""; // let the same file be re-imported
 });
+reconstructEl.addEventListener("click", () => void doReconstruct());
+reconstructCloseEl.addEventListener("click", () => closeReconstructModal());
+reconstructBackdropEl.addEventListener("click", () => closeReconstructModal());
 libraryCloseEl.addEventListener("click", () => closeLibrary());
 libraryBackdropEl.addEventListener("click", () => closeLibrary());
 libraryListEl.addEventListener("click", (e) => {
@@ -1995,7 +2059,9 @@ libraryListEl.addEventListener("click", (e) => {
   else if (action === "delete") void deleteSaved(id);
 });
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !libraryModalEl.classList.contains("hidden")) closeLibrary();
+  if (e.key !== "Escape") return;
+  if (!libraryModalEl.classList.contains("hidden")) closeLibrary();
+  if (!reconstructModalEl.classList.contains("hidden")) closeReconstructModal();
 });
 
 // Chip controls are wired once; they act on whatever the current `player` is.

@@ -15,8 +15,9 @@
 //! wrappers stay trivial.
 
 use doctree_core::{
-    build_sequence, classify_document as core_classify, walk_with, BuildStep, Classification,
-    ClassificationSignals, DocumentClass, Graph, RecommendedPipeline, WalkOptions,
+    build_sequence, classify_document as core_classify, decode_text, encode, token_stats,
+    walk_with, BuildStep, Classification, ClassificationSignals, DocumentClass, Graph,
+    RecommendedPipeline, WalkOptions,
 };
 use serde::{Deserialize, Serialize};
 
@@ -77,6 +78,85 @@ fn walk_document(text: String, params: Option<WalkParams>) -> Graph {
 #[tauri::command]
 fn build_steps(text: String, params: Option<WalkParams>) -> Vec<BuildStep> {
     build_steps_impl(&text, params)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7 #4 — reversible graph tokenizer (ADR-00013).
+//
+// Encode `(document, graph)` into one interleaved integer-id token stream that
+// projects back to *either* the byte-exact original document *or* the exact
+// graph. The "Reconstruct document" button drives `reconstruct_document`; the
+// research readout uses `tokenize_stats`. Both are pure, native-free, and run
+// the same `doctree_core` tokenizer the WASM build does — no model, no GPU.
+// ---------------------------------------------------------------------------
+
+/// The reconstruct verdict for the frontend: the recovered document text, the
+/// pinned byte-exact invariant evaluated live (`decode_text(encode(doc,g)) ==
+/// doc`), and the research stats (token count vs. document byte count).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconstructResult {
+    /// The reconstructed document. Byte-for-byte the original when `byte_exact`.
+    pub text: String,
+    /// True iff the round-trip reproduced the original document exactly.
+    pub byte_exact: bool,
+    /// Number of tokens in the stream (≥ `doc_bytes`; this is a fidelity tool,
+    /// not a codec).
+    pub tokens: usize,
+    /// Number of bytes in the original document.
+    pub doc_bytes: usize,
+    /// Size of the fixed tokenizer vocabulary (byte floor + kinds + controls).
+    pub vocab_size: u32,
+}
+
+/// Token/byte stats for the research readout without recovering the whole
+/// document. Mirrors [`doctree_core::TokenStats`] for the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenizeStats {
+    pub tokens: usize,
+    pub doc_bytes: usize,
+    pub vocab_size: u32,
+}
+
+/// Reconstruct the original document from `(text, graph)` via the reversible
+/// tokenizer. Pure; native-free; no Tauri state. `byte_exact` is the pinned
+/// text-round-trip invariant (ADR-00013) evaluated live.
+pub fn reconstruct_document_impl(text: &str, graph: &Graph) -> Result<ReconstructResult, String> {
+    let tokens = encode(text, graph);
+    let recovered = decode_text(&tokens).map_err(|e| e.to_string())?;
+    let st = token_stats(text, &tokens);
+    Ok(ReconstructResult {
+        byte_exact: recovered == text,
+        text: recovered,
+        tokens: st.tokens,
+        doc_bytes: st.doc_bytes,
+        vocab_size: st.vocab_size,
+    })
+}
+
+/// Token/byte stats for `(text, graph)` without materializing the recovered
+/// document. Pure; native-free.
+pub fn tokenize_stats_impl(text: &str, graph: &Graph) -> TokenizeStats {
+    let st = token_stats(text, &encode(text, graph));
+    TokenizeStats {
+        tokens: st.tokens,
+        doc_bytes: st.doc_bytes,
+        vocab_size: st.vocab_size,
+    }
+}
+
+/// Tauri command: reconstruct the original document from its graph (the
+/// "Reconstruct document" button).
+#[tauri::command]
+fn reconstruct_document(text: String, graph: Graph) -> Result<ReconstructResult, String> {
+    reconstruct_document_impl(&text, &graph)
+}
+
+/// Tauri command: token/byte stats for the research readout.
+#[tauri::command]
+fn tokenize_stats(text: String, graph: Graph) -> TokenizeStats {
+    tokenize_stats_impl(&text, &graph)
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +323,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             walk_document,
             build_steps,
+            reconstruct_document,
+            tokenize_stats,
             classify_document,
             llm::confirm_classification,
             llm::llm_status,
@@ -328,6 +410,51 @@ mod tests {
         let g = walk_document_impl("", None);
         assert!(g.is_valid());
         assert!(build_steps_impl("", None).is_empty() || !g.nodes.is_empty());
+    }
+
+    // --- Phase 7 #4: reversible graph tokenizer -----------------------------
+
+    #[test]
+    fn reconstruct_document_is_byte_exact_over_walker_output() {
+        let g = walk_document_impl(DOC, None);
+        let r = reconstruct_document_impl(DOC, &g).unwrap();
+        assert_eq!(r.text, DOC, "reconstruction must be byte-exact");
+        assert!(r.byte_exact);
+        assert_eq!(r.doc_bytes, DOC.len());
+        // Fidelity tool, not a codec: at least one token per document byte.
+        assert!(r.tokens >= r.doc_bytes);
+    }
+
+    #[test]
+    fn reconstruct_document_is_independent_of_graph_quality() {
+        // The text projection carries the bytes, so an empty graph still
+        // reconstructs the document exactly.
+        let empty = Graph::default();
+        let r = reconstruct_document_impl(DOC, &empty).unwrap();
+        assert_eq!(r.text, DOC);
+        assert!(r.byte_exact);
+    }
+
+    #[test]
+    fn tokenize_stats_agree_with_reconstruct() {
+        let g = walk_document_impl(DOC, None);
+        let s = tokenize_stats_impl(DOC, &g);
+        let r = reconstruct_document_impl(DOC, &g).unwrap();
+        assert_eq!(s.tokens, r.tokens);
+        assert_eq!(s.doc_bytes, r.doc_bytes);
+        assert_eq!(s.vocab_size, r.vocab_size);
+        assert_eq!(s.vocab_size, doctree_core::VOCAB_SIZE);
+    }
+
+    #[test]
+    fn reconstruct_result_serializes_camel_case() {
+        let g = walk_document_impl(DOC, None);
+        let r = reconstruct_document_impl(DOC, &g).unwrap();
+        let v = serde_json::to_value(&r).unwrap();
+        for key in ["text", "byteExact", "tokens", "docBytes", "vocabSize"] {
+            assert!(v.get(key).is_some(), "missing JSON key {key}");
+        }
+        assert_eq!(v["byteExact"], true);
     }
 
     // --- B5: document-type detection runtime gate ---------------------------

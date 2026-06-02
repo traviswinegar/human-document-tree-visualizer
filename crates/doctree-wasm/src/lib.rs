@@ -12,7 +12,9 @@
 //! both engines identically. The real serialization lives in the private
 //! `*_json` helpers so it is host-testable with `cargo test -p doctree-wasm`.
 
-use doctree_core::{build_sequence, walk_with, WalkOptions};
+use doctree_core::{
+    build_sequence, decode_graph, decode_text, encode, token_stats, walk_with, Graph, WalkOptions,
+};
 use wasm_bindgen::prelude::*;
 
 /// Build [`WalkOptions`] from optional frontend tunables, defaulting any unset.
@@ -39,6 +41,54 @@ fn build_steps_json(text: &str, opts: &WalkOptions) -> Result<String, serde_json
 /// Walk `text` → spine graph → JSON string. Host-testable core.
 fn walk_document_json(text: &str, opts: &WalkOptions) -> Result<String, serde_json::Error> {
     serde_json::to_string(&walk_with(text, opts))
+}
+
+/// Reconstruct the original document from `(text, graph)` via the reversible
+/// tokenizer (ADR-00013) → JSON `{text, byteExact, tokens, docBytes, vocabSize}`.
+///
+/// `byteExact` is the pinned text-round-trip invariant evaluated live in the
+/// browser: it is `true` iff `decode_text(encode(text, graph)) == text`.
+/// Host-testable core for the `reconstructDocument` export.
+fn reconstruct_document_json(text: &str, graph_json: &str) -> Result<String, String> {
+    let graph: Graph = serde_json::from_str(graph_json).map_err(|e| e.to_string())?;
+    let tokens = encode(text, &graph);
+    let recovered = decode_text(&tokens).map_err(|e| e.to_string())?;
+    let st = token_stats(text, &tokens);
+    serde_json::to_string(&serde_json::json!({
+        "text": recovered,
+        "byteExact": recovered == text,
+        "tokens": st.tokens,
+        "docBytes": st.doc_bytes,
+        "vocabSize": st.vocab_size,
+    }))
+    .map_err(|e| e.to_string())
+}
+
+/// Tokenize `(text, graph)` into the reversible integer-id stream (the "token
+/// list to pass into a model") → JSON `{ids, tokens, docBytes, vocabSize}`.
+/// Host-testable core for the `tokenizeGraph` export.
+fn tokenize_graph_json(text: &str, graph_json: &str) -> Result<String, String> {
+    let graph: Graph = serde_json::from_str(graph_json).map_err(|e| e.to_string())?;
+    let tokens = encode(text, &graph);
+    let st = token_stats(text, &tokens);
+    serde_json::to_string(&serde_json::json!({
+        "ids": tokens.ids(),
+        "tokens": st.tokens,
+        "docBytes": st.doc_bytes,
+        "vocabSize": st.vocab_size,
+    }))
+    .map_err(|e| e.to_string())
+}
+
+/// Round-trip the graph through the token stream and return the decoded
+/// [`Graph`] as JSON. Proves the graph-round-trip projection in the browser:
+/// the result equals the input graph (ADR-00013). Host-testable core for the
+/// `reconstructGraph` export.
+fn reconstruct_graph_json(text: &str, graph_json: &str) -> Result<String, String> {
+    let graph: Graph = serde_json::from_str(graph_json).map_err(|e| e.to_string())?;
+    let tokens = encode(text, &graph);
+    let decoded = decode_graph(&tokens).map_err(|e| e.to_string())?;
+    serde_json::to_string(&decoded).map_err(|e| e.to_string())
 }
 
 /// Install the panic hook so a Rust panic surfaces as `console.error` with a
@@ -73,6 +123,28 @@ pub fn walk_document(
 ) -> Result<String, JsValue> {
     let opts = walk_options(min_term_freq, min_clause_words, max_terms);
     walk_document_json(text, &opts).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Reconstruct the original document from a graph (the **"Reconstruct
+/// document"** button), as a JSON string
+/// (`{"text":…,"byteExact":true,"tokens":…,"docBytes":…,"vocabSize":…}`).
+#[wasm_bindgen(js_name = reconstructDocument)]
+pub fn reconstruct_document(text: &str, graph_json: &str) -> Result<String, JsValue> {
+    reconstruct_document_json(text, graph_json).map_err(|e| JsValue::from_str(&e))
+}
+
+/// Tokenize `(text, graph)` into the reversible integer-id stream, as a JSON
+/// string (`{"ids":[…],"tokens":…,"docBytes":…,"vocabSize":…}`).
+#[wasm_bindgen(js_name = tokenizeGraph)]
+pub fn tokenize_graph(text: &str, graph_json: &str) -> Result<String, JsValue> {
+    tokenize_graph_json(text, graph_json).map_err(|e| JsValue::from_str(&e))
+}
+
+/// Round-trip a graph through the token stream, returning the decoded graph as
+/// a JSON string (`{"nodes":[…],"edges":[…]}`) — the graph-round-trip projection.
+#[wasm_bindgen(js_name = reconstructGraph)]
+pub fn reconstruct_graph(text: &str, graph_json: &str) -> Result<String, JsValue> {
+    reconstruct_graph_json(text, graph_json).map_err(|e| JsValue::from_str(&e))
 }
 
 #[cfg(test)]
@@ -134,5 +206,62 @@ mod tests {
         let json = build_steps_json("", &WalkOptions::default()).unwrap();
         let v: Value = serde_json::from_str(&json).unwrap();
         assert!(v.as_array().is_some());
+    }
+
+    /// The browser-facing text round-trip: reconstruct returns the byte-exact
+    /// original and reports `byteExact: true` (ADR-00013 pinned invariant,
+    /// evaluated through the WASM JSON boundary).
+    #[test]
+    fn reconstruct_document_json_is_byte_exact() {
+        let graph_json = walk_document_json(DOC, &WalkOptions::default()).unwrap();
+        let out = reconstruct_document_json(DOC, &graph_json).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["text"], DOC);
+        assert_eq!(v["byteExact"], true);
+        // It is a fidelity tool, not a codec: the stream carries ≥ one token per byte.
+        assert!(v["tokens"].as_u64().unwrap() >= v["docBytes"].as_u64().unwrap());
+        assert!(v["docBytes"].as_u64().unwrap() >= DOC.len() as u64);
+    }
+
+    /// Text round-trip does not depend on graph correctness: an empty graph
+    /// still reconstructs the document byte-exactly (the body carries the bytes).
+    #[test]
+    fn reconstruct_document_json_is_independent_of_graph() {
+        let empty = r#"{"nodes":[],"edges":[]}"#;
+        let out = reconstruct_document_json(DOC, empty).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["text"], DOC);
+        assert_eq!(v["byteExact"], true);
+    }
+
+    /// `tokenizeGraph` yields the integer-id stream and consistent stats.
+    #[test]
+    fn tokenize_graph_json_emits_in_vocab_ids() {
+        let graph_json = walk_document_json(DOC, &WalkOptions::default()).unwrap();
+        let out = tokenize_graph_json(DOC, &graph_json).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let ids = v["ids"].as_array().expect("an array of ids");
+        assert!(!ids.is_empty());
+        assert_eq!(ids.len() as u64, v["tokens"].as_u64().unwrap());
+        let vocab = v["vocabSize"].as_u64().unwrap();
+        assert!(ids.iter().all(|i| i.as_u64().unwrap() < vocab));
+    }
+
+    /// The graph round-trip projection through the WASM boundary: decoding the
+    /// stream reproduces the input graph exactly.
+    #[test]
+    fn reconstruct_graph_json_round_trips_exactly() {
+        let graph_json = walk_document_json(DOC, &WalkOptions::default()).unwrap();
+        let out = reconstruct_graph_json(DOC, &graph_json).unwrap();
+        // serde round-trips to identical JSON values (field order is fixed by serde).
+        let original: Value = serde_json::from_str(&graph_json).unwrap();
+        let decoded: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    /// Malformed graph JSON surfaces as an `Err`, not a panic.
+    #[test]
+    fn reconstruct_document_json_rejects_bad_graph_json() {
+        assert!(reconstruct_document_json(DOC, "{ not json").is_err());
     }
 }
