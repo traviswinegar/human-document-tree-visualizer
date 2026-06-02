@@ -250,6 +250,8 @@ pub fn run() {
             llm::semantic_build_steps,
             llm::embedded_build_steps,
             llm::semantic_search,
+            llm::rag_index_document,
+            llm::rag_search,
             library::save_doc,
             library::list_docs,
             library::load_doc,

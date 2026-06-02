@@ -91,6 +91,33 @@ pub fn to_search_hits(graph: &Graph, hits: Vec<doctree_llm::SearchHit>) -> Vec<S
         .collect()
 }
 
+/// One cross-document RAG search result, flattened for the frontend (camelCase
+/// JSON): which document and node matched, the node kind tag, the stored text,
+/// and a `[0,1]` similarity score. Native-free — mirrors [`doctree_llm::RagHit`]
+/// so the IPC type exists on every build (the gated command fills it; the stub
+/// returns an actionable error).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RagHitDto {
+    pub doc_id: String,
+    pub node_id: String,
+    pub kind: String,
+    pub text: String,
+    pub score: f32,
+}
+
+impl From<doctree_llm::RagHit> for RagHitDto {
+    fn from(h: doctree_llm::RagHit) -> Self {
+        Self {
+            doc_id: h.doc_id,
+            node_id: h.node_id,
+            kind: h.kind,
+            text: h.text,
+            score: h.score,
+        }
+    }
+}
+
 /// What the frontend needs to decide whether to offer LLM-backed features:
 /// whether this binary embeds the engine, and whether a model file is actually
 /// present at the resolved path. Pure — needs neither a loaded model nor any
@@ -442,6 +469,87 @@ pub async fn semantic_search(
     Ok(to_search_hits(&graph, hits))
 }
 
+/// Tauri command: **index a document into the cross-document corpus** (Phase 6 #7
+/// / ADR-00010). Walk the document into its deterministic spine, embed its content
+/// nodes, and persist each `(doc_id, node_id)` row into the on-disk LanceDB corpus
+/// (momusdev_llm's `VectorStore`, consumed read-only). Returns how many rows were
+/// written. Unlike the in-memory B4 search, this corpus survives restarts and
+/// spans every indexed document, so [`rag_search`] can retrieve across the whole
+/// library.
+///
+/// Embedding *and* the store's own Tokio `block_on` must run off the webview's
+/// async event loop — and the store's runtime must not nest inside Tauri's async
+/// runtime — so the whole embed→open→index sequence runs on one blocking thread.
+#[cfg(feature = "vectordb")]
+#[tauri::command]
+pub async fn rag_index_document(
+    doc_id: String,
+    text: String,
+    params: Option<crate::WalkParams>,
+    state: tauri::State<'_, LlmState>,
+) -> Result<usize, String> {
+    // 1. Deterministic spine, then the (id, text) pairs worth embedding (pure).
+    let spine = crate::walk_document_impl(&text, params);
+    let inputs = doctree_llm::graph_embedding_inputs(&spine);
+    if inputs.is_empty() {
+        return Ok(0); // nothing embeddable → nothing persisted
+    }
+    let (ids, texts): (Vec<String>, Vec<String>) = inputs.into_iter().unzip();
+
+    // 2. Embed, then persist — all on ONE blocking thread. `RagStore` owns its own
+    //    Tokio runtime and drives LanceDB with `block_on`, which would panic if it
+    //    nested inside Tauri's async worker; `spawn_blocking` gives it a plain
+    //    thread, so opening the store here (not on the async path) is correct.
+    let embedder = state.embedder.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let vectors = embed_batch_blocking(embedder, texts)?;
+        let dim = vectors
+            .first()
+            .map(Vec::len)
+            .ok_or("embedder returned no vectors")?;
+        let embedded: Vec<(String, Vec<f32>)> = ids.into_iter().zip(vectors).collect();
+        let records = doctree_llm::graph_rag_records(&spine, &doc_id, &embedded);
+        let store = doctree_llm::RagStore::open(&doctree_llm::rag_db_dir(), dim)
+            .map_err(|e| e.to_string())?;
+        store.index(&records).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("corpus indexing task failed to join: {e}"))?
+}
+
+/// Tauri command: **cross-document corpus search** (Phase 6 #7 / ADR-00010). Embed
+/// the free-text `query` and return the nearest nodes across *every* indexed
+/// document (best first, capped at `top_k`, default 10) via the LanceDB ANN query.
+/// Each [`RagHitDto`] names its document + node so the frontend can jump across the
+/// whole corpus — the persistent, cross-document complement to [`semantic_search`]'s
+/// single-document in-memory rank. An empty query returns no hits.
+#[cfg(feature = "vectordb")]
+#[tauri::command]
+pub async fn rag_search(
+    query: String,
+    top_k: Option<usize>,
+    state: tauri::State<'_, LlmState>,
+) -> Result<Vec<RagHitDto>, String> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    // Embed the query, open the corpus at that vector's width, run the ANN query —
+    // all on one blocking thread (same runtime-nesting reason as indexing above).
+    let embedder = state.embedder.clone();
+    let hits = tauri::async_runtime::spawn_blocking(move || {
+        let mut vectors = embed_batch_blocking(embedder, vec![query])?;
+        let query_vec = vectors.pop().ok_or("embedder returned no query vector")?;
+        let store = doctree_llm::RagStore::open(&doctree_llm::rag_db_dir(), query_vec.len())
+            .map_err(|e| e.to_string())?;
+        store
+            .search(&query_vec, top_k.unwrap_or(10))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("corpus search task failed to join: {e}"))??;
+    Ok(hits.into_iter().map(RagHitDto::from).collect())
+}
+
 /// Native-free stand-in: same IPC contract (`{ prompt }` in, `CompletionDto`
 /// out), but this build has no engine, so it returns an actionable error
 /// instead of doing inference. Keeps the command registered on every build.
@@ -511,6 +619,31 @@ pub fn semantic_search(
     top_k: Option<usize>,
 ) -> Result<Vec<SearchHitDto>, String> {
     let _ = (&query, &text, &params, &top_k); // contract parity
+    Err(no_vectordb_error())
+}
+
+/// Native-free stand-in for corpus indexing: same IPC contract (`{ docId, text,
+/// params }` in, count out) but no embedder/store, so it returns an actionable
+/// error. The corpus is a `vectordb`-only capability — there is no deterministic
+/// fallback, so unlike confirmation this stub errors rather than no-ops.
+#[cfg(not(feature = "vectordb"))]
+#[tauri::command]
+pub fn rag_index_document(
+    doc_id: String,
+    text: String,
+    params: Option<crate::WalkParams>,
+) -> Result<usize, String> {
+    let _ = (&doc_id, &text, &params); // contract parity with the gated signature
+    Err(no_vectordb_error())
+}
+
+/// Native-free stand-in for corpus search: same IPC contract (`{ query, topK }`
+/// in, `RagHitDto[]` out) but no embedder/store, so it returns an actionable
+/// error. The frontend should fall back to the single-document literal search.
+#[cfg(not(feature = "vectordb"))]
+#[tauri::command]
+pub fn rag_search(query: String, top_k: Option<usize>) -> Result<Vec<RagHitDto>, String> {
+    let _ = (&query, &top_k); // contract parity with the gated signature
     Err(no_vectordb_error())
 }
 
@@ -676,6 +809,46 @@ mod tests {
             serde_json::to_value(&confirmed).unwrap(),
             serde_json::to_value(&deterministic).unwrap()
         );
+    }
+
+    #[cfg(not(feature = "vectordb"))]
+    #[test]
+    fn rag_commands_are_actionable_errors_without_vectordb() {
+        // The corpus store is a `vectordb`-only capability with no deterministic
+        // fallback, so on a native-free build both commands must return the
+        // actionable rebuild hint — never silently succeed, never panic.
+        let idx = rag_index_document("docA".into(), "Mara met Vane.".into(), None);
+        assert!(idx.unwrap_err().contains("--features vectordb"));
+        let search = rag_search("ship".into(), Some(5));
+        assert!(search.unwrap_err().contains("--features vectordb"));
+    }
+
+    #[test]
+    fn rag_hit_dto_maps_every_field_and_serializes_camel_case() {
+        // The DTO mirrors `doctree_llm::RagHit` one-to-one and serialises to the
+        // camelCase the frontend reads (docId/nodeId, not doc_id/node_id).
+        let hit = doctree_llm::RagHit {
+            doc_id: "docA".into(),
+            node_id: "char:mara".into(),
+            kind: "character".into(),
+            text: "Mara".into(),
+            score: 0.87,
+        };
+        let dto = RagHitDto::from(hit);
+        assert_eq!(dto.doc_id, "docA");
+        assert_eq!(dto.node_id, "char:mara");
+        assert_eq!(dto.kind, "character");
+        assert_eq!(dto.text, "Mara");
+
+        let v = serde_json::to_value(&dto).unwrap();
+        assert_eq!(v["docId"], "docA");
+        assert_eq!(v["nodeId"], "char:mara");
+        assert_eq!(v["kind"], "character");
+        assert_eq!(v["text"], "Mara");
+        assert!(v["score"].is_number());
+        // snake_case must NOT leak through.
+        assert!(v.get("doc_id").is_none());
+        assert!(v.get("node_id").is_none());
     }
 
     #[test]

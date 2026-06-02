@@ -71,6 +71,29 @@ impl NodeKind {
     pub fn is_semantic(self) -> bool {
         !self.is_structural()
     }
+
+    /// The stable snake_case string tag for this kind — identical to its serde
+    /// serialization. Handy where a plain `&str` is needed (e.g. persisting the
+    /// kind as a column value in the cross-document vector store) without pulling
+    /// `serde_json` into that layer. Kept in lockstep with the
+    /// `#[serde(rename_all = "snake_case")]` tags by a test below.
+    pub fn tag(self) -> &'static str {
+        match self {
+            NodeKind::Section => "section",
+            NodeKind::Paragraph => "paragraph",
+            NodeKind::Sentence => "sentence",
+            NodeKind::Clause => "clause",
+            NodeKind::Quote => "quote",
+            NodeKind::Reference => "reference",
+            NodeKind::Term => "term",
+            NodeKind::Character => "character",
+            NodeKind::Place => "place",
+            NodeKind::Concept => "concept",
+            NodeKind::Event => "event",
+            NodeKind::Object => "object",
+            NodeKind::Group => "group",
+        }
+    }
 }
 
 /// How two nodes relate. Serializes to a stable snake_case tag enumerated by the
@@ -355,6 +378,35 @@ mod tests {
             serde_json::to_value(NodeKind::Reference).unwrap(),
             serde_json::json!("reference")
         );
+    }
+
+    #[test]
+    fn node_kind_tag_is_locked_to_its_serde_serialization() {
+        // `tag()` exists so non-serde layers (the cross-document vector store)
+        // can name a kind with a plain &str; it must never drift from what serde
+        // emits, or a persisted `source_type` would stop matching the JSON tag.
+        let all = [
+            NodeKind::Section,
+            NodeKind::Paragraph,
+            NodeKind::Sentence,
+            NodeKind::Clause,
+            NodeKind::Quote,
+            NodeKind::Reference,
+            NodeKind::Term,
+            NodeKind::Character,
+            NodeKind::Place,
+            NodeKind::Concept,
+            NodeKind::Event,
+            NodeKind::Object,
+            NodeKind::Group,
+        ];
+        for k in all {
+            assert_eq!(
+                serde_json::to_value(k).unwrap(),
+                serde_json::json!(k.tag()),
+                "tag() drifted from serde for {k:?}"
+            );
+        }
     }
 
     #[test]

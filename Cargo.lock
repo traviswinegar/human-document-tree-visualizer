@@ -2498,6 +2498,7 @@ dependencies = [
  "doctree-core",
  "momusdev_llm",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

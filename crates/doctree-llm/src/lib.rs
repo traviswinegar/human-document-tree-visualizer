@@ -420,6 +420,112 @@ pub fn similarity_edges(
     edges
 }
 
+// ---------------------------------------------------------------------------
+// Cross-document persistent RAG (Phase 6 #7 / ADR-00010) — native-free surface.
+//
+// B4 ranks ONE document's node vectors in memory (brute-force cosine). True RAG
+// spans a *corpus* and must survive restarts — that's what the on-disk LanceDB
+// store (momusdev_llm's `VectorStore`, gated `vectordb`) provides. Everything
+// that shapes what we persist and what a search returns — the on-disk location,
+// the corpus-unique key, the (graph, embeddings) → records join, the result DTO —
+// is plain data and lives here native-free, so the default `cargo test` exercises
+// it exactly like the B4 similarity logic. The gated `RagStore` below only moves
+// these records in and out of LanceDB (consumed read-only — ADR-0001).
+// ---------------------------------------------------------------------------
+
+/// Environment variable pointing at the on-disk corpus vector store (a LanceDB
+/// directory). If unset, [`rag_db_dir`] falls back to a stable per-user temp
+/// subdirectory so the corpus persists across runs without configuration.
+pub const RAG_DB_ENV: &str = "DOCTREE_RAG_DB";
+
+/// Resolve the corpus vector-store directory: the [`RAG_DB_ENV`] env var if set
+/// and non-empty, else a stable per-user subdirectory. Native-free, so the Tauri
+/// layer can name the location even on a build compiled without `vectordb`.
+pub fn rag_db_dir() -> String {
+    std::env::var(RAG_DB_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join("doctree-rag-db")
+                .to_string_lossy()
+                .into_owned()
+        })
+}
+
+/// The corpus-unique key for one persisted node: `"{doc_id}\u{1f}{node_id}"`. The
+/// ASCII Unit Separator (`0x1f`) can't occur in a document id or a walker node id
+/// (both printable), so the composite is collision-free across documents and
+/// splits back unambiguously (see [`split_rag_key`]). It is the store row's
+/// primary id, keeping the same node id distinct across different documents.
+pub fn rag_storage_key(doc_id: &str, node_id: &str) -> String {
+    format!("{doc_id}\u{1f}{node_id}")
+}
+
+/// Split a [`rag_storage_key`] back into `(doc_id, node_id)`. Returns `None` when
+/// the separator is absent (i.e. the string isn't one of our composite keys).
+pub fn split_rag_key(key: &str) -> Option<(&str, &str)> {
+    key.split_once('\u{1f}')
+}
+
+/// One node staged for the corpus store: its owning document, the node's id and
+/// kind, the text that was embedded, and that embedding vector. Built from a
+/// walked graph + its embeddings by [`graph_rag_records`]; the gated `RagStore`
+/// turns each into one stored row. Native-free.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RagRecord {
+    pub doc_id: String,
+    pub node_id: String,
+    pub kind: doctree_core::NodeKind,
+    pub text: String,
+    pub vector: Vec<f32>,
+}
+
+/// Join a walked `graph` with its node `embedded` vectors into the corpus records
+/// to persist under `doc_id`. Each `(node_id, vector)` is matched to its node so
+/// the stored row carries the node's kind and embedded text; a vector whose node
+/// is absent from the graph (or whose resolved text is empty) is skipped —
+/// defensive, since they come from the same graph. The embedded text mirrors
+/// [`graph_embedding_inputs`] (span text, else label). Pure and deterministic.
+pub fn graph_rag_records(
+    graph: &doctree_core::Graph,
+    doc_id: &str,
+    embedded: &[(String, Vec<f32>)],
+) -> Vec<RagRecord> {
+    embedded
+        .iter()
+        .filter_map(|(id, vector)| {
+            let node = graph.nodes.iter().find(|n| &n.id == id)?;
+            let text = node
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| node.label.trim());
+            (!text.is_empty()).then(|| RagRecord {
+                doc_id: doc_id.to_string(),
+                node_id: id.clone(),
+                kind: node.kind,
+                text: text.to_string(),
+                vector: vector.clone(),
+            })
+        })
+        .collect()
+}
+
+/// One corpus-search result: which document and node matched, the node kind tag,
+/// the stored text, and a `[0,1]` similarity score (higher = nearer). Returned by
+/// the gated `RagStore::search`; native-free so the Tauri DTO never depends on the
+/// store being compiled in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RagHit {
+    pub doc_id: String,
+    pub node_id: String,
+    pub kind: String,
+    pub text: String,
+    pub score: f32,
+}
+
 /// Configuration for loading a local GGUF model.
 ///
 /// Native-free: this struct and its builders exist regardless of the `llm`
@@ -630,6 +736,131 @@ mod embedder {
 
 #[cfg(feature = "vectordb")]
 pub use embedder::Embedder;
+
+// ---------------------------------------------------------------------------
+// Cross-document persistent RAG store — only under `vectordb`. A thin, *sync*
+// wrapper over momusdev_llm's async `VectorStore` (LanceDB), consumed read-only:
+// we map our native-free `RagRecord`/`RagHit` to and from the sibling's
+// `TaskProposal`/`QueryResult` and never touch the crate itself (ADR-0001).
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "vectordb")]
+mod rag {
+    use super::{rag_storage_key, split_rag_key, RagHit, RagRecord};
+    use anyhow::{Context, Result};
+    use momusdev_llm::storage::VectorStore;
+    use momusdev_llm::types::{Metadata, TaskProposal};
+
+    /// A handle to the on-disk corpus vector store. Owns a small Tokio runtime so
+    /// the rest of the crate (and the Tauri command layer) call the store with
+    /// plain *sync* methods — `VectorStore` is async (LanceDB on Tokio), and
+    /// `block_on` keeps the consumption pattern identical to the sync `Engine` and
+    /// `Embedder` (one `spawn_blocking` on the caller's side). Opening is cheap
+    /// (a directory connection), so the command layer opens per operation rather
+    /// than holding this in managed state.
+    pub struct RagStore {
+        inner: VectorStore,
+        rt: tokio::runtime::Runtime,
+        dim: usize,
+    }
+
+    impl RagStore {
+        /// Open (or create) the corpus store at `db_path` for `embedding_dim`-wide
+        /// vectors. The dim must match the embedder (384 for MiniLM-L6-v2) and the
+        /// existing table, if any. CPU/IO-bound; call from `spawn_blocking`.
+        pub fn open(db_path: &str, embedding_dim: usize) -> Result<Self> {
+            let rt = tokio::runtime::Runtime::new()
+                .context("building the Tokio runtime for the corpus vector store")?;
+            let inner = rt
+                .block_on(VectorStore::open(db_path, embedding_dim))
+                .with_context(|| format!("opening the corpus vector store at {db_path}"))?;
+            Ok(Self { inner, rt, dim: embedding_dim })
+        }
+
+        /// The embedding dimensionality this store was opened for.
+        pub fn dimension(&self) -> usize {
+            self.dim
+        }
+
+        /// Persist `records` into the corpus — one stored row per record, keyed by
+        /// [`rag_storage_key`] so the same node id stays distinct across documents.
+        /// Returns how many rows were written. A record whose vector width doesn't
+        /// match the store dim is skipped (a mismatched embedder would corrupt the
+        /// fixed-size column). IO-bound; call from `spawn_blocking`.
+        pub fn index(&self, records: &[RagRecord]) -> Result<usize> {
+            let marker = ingest_marker();
+            let mut written = 0usize;
+            for r in records {
+                if r.vector.len() != self.dim {
+                    continue;
+                }
+                let proposal = TaskProposal {
+                    id: rag_storage_key(&r.doc_id, &r.node_id),
+                    text: r.text.clone(),
+                    vector_embedding: r.vector.clone(),
+                    source_metadata: Metadata {
+                        source_id: r.doc_id.clone(),
+                        source_type: r.kind.tag().to_string(),
+                        ingested_at: marker.clone(),
+                        extra: Some(r.node_id.clone()),
+                    },
+                    confidence_score: 1.0,
+                };
+                self.rt
+                    .block_on(self.inner.upsert(&proposal))
+                    .with_context(|| format!("persisting corpus row {}", proposal.id))?;
+                written += 1;
+            }
+            Ok(written)
+        }
+
+        /// Search the whole corpus for the nearest `limit` nodes to `query_vec`,
+        /// best first. Each hit names its document + node so the frontend can jump
+        /// across documents. IO-bound; call from `spawn_blocking`.
+        pub fn search(&self, query_vec: &[f32], limit: usize) -> Result<Vec<RagHit>> {
+            let results = self
+                .rt
+                .block_on(self.inner.search(query_vec, limit))
+                .context("searching the corpus vector store")?;
+            Ok(results
+                .into_iter()
+                .map(|q| {
+                    // Prefer the explicit ids in metadata; fall back to splitting
+                    // the composite key if a row somehow lacks them.
+                    let (doc_id, node_id) = match q.source_metadata.extra.as_deref() {
+                        Some(node_id) => {
+                            (q.source_metadata.source_id.clone(), node_id.to_string())
+                        }
+                        None => split_rag_key(&q.id)
+                            .map(|(d, n)| (d.to_string(), n.to_string()))
+                            .unwrap_or_else(|| (q.source_metadata.source_id.clone(), q.id.clone())),
+                    };
+                    RagHit {
+                        doc_id,
+                        node_id,
+                        kind: q.source_metadata.source_type,
+                        text: q.text,
+                        score: q.confidence_score as f32,
+                    }
+                })
+                .collect())
+        }
+    }
+
+    /// A monotone, sortable ingest marker (Unix-epoch seconds as text) for the
+    /// store's non-null `ingested_at` column — no calendar formatting needed, so
+    /// no date-crate dependency is pulled into this layer.
+    fn ingest_marker() -> String {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        secs.to_string()
+    }
+}
+
+#[cfg(feature = "vectordb")]
+pub use rag::RagStore;
 
 #[cfg(test)]
 mod tests {
@@ -940,6 +1171,140 @@ mod tests {
         if std::env::var(EMBED_CACHE_ENV).is_err() {
             assert!(embed_cache_dir().contains("doctree-embed-cache"));
         }
+    }
+
+    // --- Cross-document persistent RAG: native-free surface (Phase 6 #7) ------
+
+    #[test]
+    fn rag_db_dir_prefers_the_env_var() {
+        if std::env::var(RAG_DB_ENV).is_err() {
+            assert!(rag_db_dir().contains("doctree-rag-db"));
+        }
+    }
+
+    #[test]
+    fn rag_storage_key_is_corpus_unique_and_splits_back() {
+        // The same node id in two documents yields two distinct keys, and each
+        // round-trips to its (doc_id, node_id) — so a stored row stays addressable
+        // across the whole corpus.
+        let a = rag_storage_key("docA", "char:mara");
+        let b = rag_storage_key("docB", "char:mara");
+        assert_ne!(a, b, "same node id in different docs must not collide");
+        assert_eq!(split_rag_key(&a), Some(("docA", "char:mara")));
+        assert_eq!(split_rag_key(&b), Some(("docB", "char:mara")));
+        // A plain id with no separator is not one of our keys.
+        assert_eq!(split_rag_key("char:mara"), None);
+    }
+
+    #[test]
+    fn graph_rag_records_join_nodes_with_their_vectors() {
+        use doctree_core::{Graph, Node, NodeKind, Span};
+        let mut g = Graph::new();
+        g.push_node(
+            Node::structural("sent:1", NodeKind::Sentence, "Mara met Vane.")
+                .with_text("Mara met Vane.")
+                .with_span(Span::new(0, 14)),
+        );
+        g.push_node(Node::semantic("char:mara", NodeKind::Character, "Mara")); // label only
+
+        // One vector per real node, plus one for a node that isn't in the graph.
+        let embedded = vec![
+            ("sent:1".to_string(), vec![0.1, 0.2, 0.3]),
+            ("char:mara".to_string(), vec![0.4, 0.5, 0.6]),
+            ("ghost".to_string(), vec![9.9, 9.9, 9.9]), // dropped — not in graph
+        ];
+        let recs = graph_rag_records(&g, "docA", &embedded);
+
+        assert_eq!(recs.len(), 2, "the ghost vector is skipped");
+        assert_eq!(recs[0].doc_id, "docA");
+        assert_eq!(recs[0].node_id, "sent:1");
+        assert_eq!(recs[0].kind, NodeKind::Sentence);
+        assert_eq!(recs[0].text, "Mara met Vane."); // span text
+        assert_eq!(recs[0].vector, vec![0.1, 0.2, 0.3]);
+        // The character node has no span text, so it falls back to its label.
+        assert_eq!(recs[1].node_id, "char:mara");
+        assert_eq!(recs[1].kind, NodeKind::Character);
+        assert_eq!(recs[1].text, "Mara");
+    }
+
+    /// Real round-trip against momusdev_llm's LanceDB `VectorStore`, proving the
+    /// corpus persists node embeddings keyed by document and answers nearest-
+    /// neighbour queries across documents. Gated under `vectordb` (pulls the
+    /// LanceDB native stack); uses synthetic vectors so it needs no embedder
+    /// download and no network. The live embedder-backed run is the desktop end
+    /// test (the model download can't happen headlessly).
+    #[cfg(feature = "vectordb")]
+    #[test]
+    fn rag_store_round_trips_records_across_documents() {
+        use doctree_core::NodeKind;
+
+        // A unique temp dir without a tempfile dep (epoch-nanos), cleaned at end.
+        let base = std::env::temp_dir().join(format!(
+            "doctree-rag-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = base.to_string_lossy().to_string();
+
+        let store = RagStore::open(&db, 4).expect("open corpus store");
+        assert_eq!(store.dimension(), 4);
+
+        // Two documents whose node ids collide (`char:mara`) — must stay distinct.
+        let recs = vec![
+            RagRecord {
+                doc_id: "docA".into(),
+                node_id: "char:mara".into(),
+                kind: NodeKind::Character,
+                text: "Mara".into(),
+                vector: vec![1.0, 0.0, 0.0, 0.0],
+            },
+            RagRecord {
+                doc_id: "docB".into(),
+                node_id: "char:mara".into(),
+                kind: NodeKind::Character,
+                text: "a different Mara".into(),
+                vector: vec![0.0, 1.0, 0.0, 0.0],
+            },
+            RagRecord {
+                doc_id: "docA".into(),
+                node_id: "term:ship".into(),
+                kind: NodeKind::Term,
+                text: "ship".into(),
+                vector: vec![0.0, 0.0, 1.0, 0.0],
+            },
+        ];
+        // A wrong-width vector is skipped, not stored.
+        let mut with_bad = recs.clone();
+        with_bad.push(RagRecord {
+            doc_id: "docA".into(),
+            node_id: "bad:dim".into(),
+            kind: NodeKind::Term,
+            text: "bad".into(),
+            vector: vec![1.0, 2.0], // width 2 != 4
+        });
+        assert_eq!(store.index(&with_bad).expect("index"), 3, "bad-width row skipped");
+
+        // Nearest to docA's Mara vector → docA's Mara is the top hit, with its
+        // document, node id, kind tag and text recovered from the store.
+        let hits = store.search(&[1.0, 0.0, 0.0, 0.0], 3).expect("search");
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].doc_id, "docA");
+        assert_eq!(hits[0].node_id, "char:mara");
+        assert_eq!(hits[0].kind, "character");
+        assert_eq!(hits[0].text, "Mara");
+        assert!(hits[0].score > 0.0 && hits[0].score <= 1.0);
+
+        // All three stored rows are retrievable; docB's same-named node is its own.
+        let keyed: std::collections::BTreeSet<(String, String)> = hits
+            .iter()
+            .map(|h| (h.doc_id.clone(), h.node_id.clone()))
+            .collect();
+        assert!(keyed.contains(&("docB".to_string(), "char:mara".to_string())));
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

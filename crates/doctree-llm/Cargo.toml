@@ -19,11 +19,14 @@ llm = ["dep:momusdev_llm", "momusdev_llm/inference"]
 cuda = ["llm", "momusdev_llm/cuda"]
 vulkan = ["llm", "momusdev_llm/vulkan"]
 # Embeddings (all-MiniLM-L6-v2 via fastembed/ONNX) for similarity edges + search
-# (B4). Independent of `llm`: this turns on the embedder (downloaded ORT binary,
-# no C++ toolchain) WITHOUT compiling llama.cpp, so a build can do embeddings
-# alone, inference alone, or both. Heavy deps (lancedb/arrow/fastembed) but no
-# native compiler beyond what `cargo` links.
-vectordb = ["dep:momusdev_llm", "momusdev_llm/vectordb"]
+# (B4) AND the cross-document persistent RAG store (Phase 6 #7 / ADR-00010 — the
+# on-disk LanceDB corpus via momusdev_llm's `VectorStore`). Independent of `llm`:
+# this turns on the embedder + store (downloaded ORT binary, no C++ toolchain)
+# WITHOUT compiling llama.cpp, so a build can do embeddings alone, inference
+# alone, or both. Heavy deps (lancedb/arrow/fastembed) but no native compiler
+# beyond what `cargo` links. `dep:tokio` is the runtime the sync `RagStore`
+# wrapper drives the async `VectorStore` with — gated here, never in the default.
+vectordb = ["dep:momusdev_llm", "momusdev_llm/vectordb", "dep:tokio"]
 
 [dependencies]
 doctree-core = { path = "../doctree-core" }
@@ -33,6 +36,13 @@ anyhow.workspace = true
 # graph stays native-free unless a feature above turns it on. Path dep on the
 # user's shared sibling crate — consumed read-only, never modified (ADR-0001).
 momusdev_llm = { path = "E:/Development/momusdev-packages/momusdev_llm", optional = true, default-features = false }
+
+# Tokio runtime for the sync `RagStore` wrapper to drive the async LanceDB
+# `VectorStore` via `block_on`. Optional + only in the `vectordb` feature, so the
+# native-free default never pulls it (ADR-0001). `momusdev_llm` already enables
+# the rt/time/io features when `vectordb` is on; `rt-multi-thread` lets
+# `Runtime::new()` build a full runtime here.
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 
 [dev-dependencies]
 # Test-only: the live extraction test deserializes the model's JSON back into the
