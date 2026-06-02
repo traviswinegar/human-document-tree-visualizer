@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>human-document-tree</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #05070d;
+        overflow: hidden;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+      }
+      #graph {
+        width: 100vw;
+        height: 100vh;
+      }
+      #hud {
+        position: fixed;
+        top: 12px;
+        left: 14px;
+        z-index: 10;
+        color: #cfe3ff;
+        font-size: 13px;
+        line-height: 1.5;
+        pointer-events: none;
+        text-shadow: 0 1px 2px #000;
+      }
+      #hud h1 {
+        margin: 0 0 2px;
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+      #hud .meta {
+        opacity: 0.7;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hud">
+      <h1>human-document-tree</h1>
+      <div class="meta" id="stats">loading fixture…</div>
+    </div>
+    <div id="graph"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
