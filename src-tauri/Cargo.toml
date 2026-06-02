@@ -19,9 +19,12 @@ default = []
 # and lights up the gated engine in `src/llm.rs`. Needs a C++ toolchain (MSVC +
 # CMake) on PATH; a failed native build here must never block the default one.
 llm = ["doctree-llm/llm"]
-# GPU backends — each implies `llm` so the gated code compiles in. Currently
-# blocked on this machine (BUILD_LOG Catch-all: CUDA 13.1 ✗ VS 2026; Vulkan ✗
-# MSVC 14.50). Kept wired so a fixed toolchain is a one-flag rebuild.
+# GPU backends — each implies `llm` so the gated code compiles in. `cuda` BUILDS
+# and links on this machine from the VS 2019 BuildTools env (MSVC 14.29, which
+# nvcc 13.1 accepts) — use scripts/dev-desktop-gpu.cmd; ADR-0008. Build it as
+# `--features llm,cuda` only: adding `vectordb` makes the app fail at link under
+# VS 2019 (the prebuilt ONNX Runtime needs newer-MSVC STL symbols 14.29 lacks).
+# `vulkan` is still blocked here (vulkan-shaders-gen failed under MSVC 14.50).
 cuda = ["llm", "doctree-llm/cuda"]
 vulkan = ["llm", "doctree-llm/vulkan"]
 # Embeddings (similarity edges + semantic search, B4). Lights up the gated

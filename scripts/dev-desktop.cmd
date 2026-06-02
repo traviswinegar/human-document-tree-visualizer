@@ -16,8 +16,9 @@ REM      llama.cpp backend behind the `llm` feature).
 REM   2. Points DOCTREE_MODEL_PATH at a local GGUF model. Override it by setting
 REM      the env var before running this; otherwise it defaults to the qwen3-4b
 REM      recorded in BUILD_LOG's Phase 0 facts.
-REM   3. Runs `tauri dev` with the gated features on. CPU inference only - GPU
-REM      (cuda/vulkan) is blocked on this toolchain; see BUILD_LOG Catch-all.
+REM   3. Runs `tauri dev` with the gated features on. CPU inference (this loads
+REM      the VS 2026 MSVC, which nvcc rejects). For GPU/CUDA offload use
+REM      scripts\dev-desktop-gpu.cmd, which loads VS 2019 instead (ADR-0008).
 REM ---------------------------------------------------------------------------
 
 call "E:\Program Files\Visual Studio\VC\Auxiliary\Build\vcvars64.bat"
