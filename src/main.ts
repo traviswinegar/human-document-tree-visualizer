@@ -3,6 +3,7 @@ import type { NodeObject, LinkObject } from "3d-force-graph";
 import fixtureJson from "../fixtures/sample-narrative.graph.json";
 import type { DocGraph, GraphNode, GraphEdge } from "./types";
 import { nodeColor, nodeSize, edgeColor } from "./colors";
+import { buildSequence, createBuildPlayer } from "./build-player";
 
 // The shared fixture (ADR-0001 render target). Imported at build time so the
 // scaffold renders something real before the Tauri walker stream exists (A8).
@@ -31,6 +32,9 @@ const statsEl = document.getElementById("stats")!;
 const searchEl = document.getElementById("search") as HTMLInputElement;
 const searchCountEl = document.getElementById("search-count")!;
 const resetEl = document.getElementById("reset") as HTMLButtonElement;
+const playPauseEl = document.getElementById("playpause") as HTMLButtonElement;
+const replayEl = document.getElementById("replay") as HTMLButtonElement;
+const buildProgressEl = document.getElementById("build-progress")!;
 
 // Search/highlight state. When a search is active, matched nodes keep full color
 // and the rest dim out, so a query reads as "light up the matches" against the
@@ -42,10 +46,9 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
   .width(window.innerWidth)
   .height(window.innerHeight)
   .backgroundColor("#05070d")
-  .graphData({
-    nodes: fixture.nodes as unknown as NodeObject[],
-    links: fixture.edges as unknown as LinkObject[],
-  })
+  // Starts empty; the build player (A7) streams the spine in so the graph grows
+  // on screen. A8 will feed this same path from the live Tauri walker stream.
+  .graphData({ nodes: [], links: [] })
   .nodeColor((n) => {
     const g = asNode(n);
     const base = nodeColor(g.kind);
@@ -74,7 +77,6 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
   .linkDirectionalParticleSpeed(0.006)
   .linkDirectionalParticleWidth(1.4);
 
-graph.zoomToFit(0, 60);
 statsEl.textContent = `${fixture.nodes.length} nodes · ${fixture.edges.length} edges (fixture)`;
 
 // Re-assigning the accessors is how 3d-force-graph is told to re-evaluate node /
@@ -98,7 +100,10 @@ function runSearch(): void {
   searchActive = q.length > 0;
   matched.clear();
   if (searchActive) {
-    for (const n of fixture.nodes) {
+    // Search what's currently on screen, so mid-build a query only finds nodes
+    // that have already been revealed.
+    for (const ro of graph.graphData().nodes) {
+      const n = asNode(ro);
       const hay = `${n.label} ${n.text ?? ""} ${n.kind}`.toLowerCase();
       if (hay.includes(q)) matched.add(n.id);
     }
@@ -138,9 +143,55 @@ window.addEventListener("resize", () => {
   graph.width(window.innerWidth).height(window.innerHeight);
 });
 
+// --- A7: animated build + replay -------------------------------------------
+const sequence = buildSequence(fixture);
+
+const player = createBuildPlayer({
+  sequence,
+  intervalMs: 220,
+  apply: (nodes, edges) => {
+    graph.graphData({
+      nodes: nodes as unknown as NodeObject[],
+      links: edges as unknown as LinkObject[],
+    });
+  },
+  onProgress: (step, total, done) => {
+    playPauseEl.textContent = player.isPlaying() ? "Pause" : done ? "Replay" : "Play";
+    buildProgressEl.textContent = done
+      ? "build complete — explore"
+      : `building ${step}/${total}`;
+    // Keep the growing graph framed while the build runs; settle on completion.
+    if (done) graph.zoomToFit(800, 80);
+    else if (step % 4 === 0) graph.zoomToFit(500, 80);
+  },
+});
+
+playPauseEl.addEventListener("click", () => {
+  // After completion the button replays; otherwise it toggles play/pause.
+  if (player.isDone()) player.replay();
+  else player.toggle();
+  playPauseEl.textContent = player.isPlaying() ? "Pause" : "Play";
+});
+replayEl.addEventListener("click", () => {
+  searchEl.value = "";
+  searchActive = false;
+  matched.clear();
+  searchCountEl.textContent = "";
+  refresh();
+  player.replay();
+});
+
+player.play();
+
 // Dev-only handle so the running 3D scene is inspectable from the page console /
 // preview tooling (WebGL canvases can't be verified via readPixels under the
 // default preserveDrawingBuffer:false). Stripped from production builds.
 if (import.meta.env.DEV) {
-  (window as Window & { __doctreeGraph?: typeof graph }).__doctreeGraph = graph;
+  Object.assign(window as object, {
+    __doctreeGraph: graph,
+    __doctreePlayer: player,
+    __doctreeSequence: sequence,
+    __doctreeBuildSequence: buildSequence,
+    __doctreeFixture: fixture,
+  });
 }

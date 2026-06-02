@@ -78,6 +78,34 @@
         font-size: 12px;
         min-width: 64px;
       }
+      #playback {
+        position: fixed;
+        bottom: 14px;
+        left: 14px;
+        z-index: 10;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      #playback button {
+        font: inherit;
+        font-size: 13px;
+        color: #cfe3ff;
+        background: rgba(13, 20, 38, 0.85);
+        border: 1px solid #33415c;
+        border-radius: 6px;
+        padding: 6px 12px;
+        cursor: pointer;
+        outline: none;
+      }
+      #playback button:hover {
+        border-color: #7aa2ff;
+        background: rgba(26, 38, 64, 0.9);
+      }
+      #build-progress {
+        color: #9bb0d6;
+        font-size: 12px;
+      }
     </style>
   </head>
   <body>
@@ -95,6 +123,11 @@
       />
       <span id="search-count"></span>
       <button id="reset" type="button">Reset view</button>
+    </div>
+    <div id="playback">
+      <button id="playpause" type="button">Pause</button>
+      <button id="replay" type="button">Replay</button>
+      <span id="build-progress"></span>
     </div>
     <div id="graph"></div>
     <script type="module" src="/src/main.ts"></script>
