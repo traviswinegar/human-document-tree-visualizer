@@ -131,55 +131,121 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
   .d3VelocityDecay(0.45)
   .cooldownTime(12000)
   .warmupTicks(0)
-  // The layout dropdown can switch to a hierarchical (DAG) layout, but the graph
-  // is only tree-like in its spine — semantic cross-links (interacts_with,
-  // co_occurs_with, similarity) introduce cycles. A no-op onDagError tells
-  // 3d-force-graph to tolerate them (skip the offending links for depth
-  // assignment) instead of throwing and freezing the layout.
+  // Defensive no-op: we never enable a built-in DAG layout (the document graph
+  // isn't a tree — see the layout dropdown below for why), but if one is ever
+  // re-introduced this keeps 3d-force-graph tolerating the cyclic cross-links
+  // (co_occurs_with, similarity) instead of throwing and freezing the layout.
   .onDagError(() => {});
 
-// --- Keep the final layout open (don't collapse the snakes into a ball) ----
+// --- Adaptive force tuning (don't collapse the snakes into a ball) ---------
 // A force-directed graph relaxes toward its minimum-energy shape. With d3's
 // default charge (-30) the structural spine — a long `precedes` chain of
 // sentences plus its branching sections/clauses — coils up into one dense ball
-// the moment the build stops reheating the sim. The lovely snaking / looping
-// filaments you see *during* formation are that same chain before repulsion has
-// spread it out. So crank the node-node repulsion (and give edges a little more
-// resting room) to make the *equilibrium itself* open and filamentary: the shape
-// that grows is the shape that stays. `distanceMax` caps the repulsion range so
-// the graph opens up without exploding off-screen. These are the tuning knobs —
-// more-negative CHARGE_STRENGTH or larger LINK_DISTANCE = more spread.
-const CHARGE_STRENGTH = -90; // node-node repulsion (was d3 default -30)
-const CHARGE_MAX_DISTANCE = 600; // beyond this, nodes stop repelling (keeps it from exploding)
-const LINK_DISTANCE = 40; // resting edge length (was d3 default ~30)
+// the moment the build stops reheating the sim. So crank the node-node repulsion
+// (and give edges a little more resting room) to make the *equilibrium itself*
+// open and filamentary: the shape that grows is the shape that stays.
+//
+// But one fixed setting can't serve both the ~40-node fixture and a 100k-word
+// document (~1800 nodes, ~9000 edges): the small-graph tuning that looked good on
+// the fixture leaves a large graph a cramped, unreadable knot. So scale the
+// repulsion, its range, and the resting edge length with node count — small
+// graphs keep the original open look, large graphs spread enough to read.
+// `distanceMax` caps the repulsion range so the graph opens without exploding.
 type ForceTunable = {
   strength?(v: number): unknown;
   distanceMax?(v: number): unknown;
   distance?(v: number): unknown;
 };
-const chargeForce = graph.d3Force("charge") as ForceTunable | undefined;
-chargeForce?.strength?.(CHARGE_STRENGTH);
-chargeForce?.distanceMax?.(CHARGE_MAX_DISTANCE);
-const linkForce = graph.d3Force("link") as ForceTunable | undefined;
-linkForce?.distance?.(LINK_DISTANCE);
+
+// 0 at small graphs (≤150 nodes), ramping to 1 by ~1800. One lever for every
+// size-sensitive knob below, so the whole layout scales coherently.
+function spread(n: number): number {
+  return Math.min(1, Math.max(0, (n - 150) / 1650));
+}
+
+// Re-tune the force simulation for a graph of `n` nodes. Called when a build's
+// final size is known (and again when the semantic delta grows it) and on every
+// layout switch.
+function applyForceTuning(n: number): void {
+  const t = spread(n);
+  const charge = -(90 + 180 * t); // -90 (small) … -270 (large): node-node repulsion
+  const chargeMax = 600 + 1100 * t; // 600 … 1700: cap repulsion range (no explosion)
+  const linkDist = 40 + 55 * t; // 40 … 95: resting edge length
+  const cf = graph.d3Force("charge") as ForceTunable | undefined;
+  cf?.strength?.(charge);
+  cf?.distanceMax?.(chargeMax);
+  const lf = graph.d3Force("link") as ForceTunable | undefined;
+  lf?.distance?.(linkDist);
+}
+applyForceTuning(0); // baseline for the empty / initial graph
 
 // --- Layout dropdown -------------------------------------------------------
-// The default open force layout (above) is great for seeing the *shape* of the
-// whole graph, but a long structural document also reads well as a hierarchy. The
-// dropdown switches 3d-force-graph between the free force layout and a few DAG
-// modes (direction comes from the part_of / precedes edges); semantic cross-links
-// that would form cycles are tolerated via the onDagError no-op set above.
-type LayoutMode = "force" | "td" | "lr" | "radialout";
+// Why no top-down/left-right/radial *DAG* layout? The document graph isn't a
+// tree. The `precedes` edge chains every sentence to the next, so a DAG layout
+// assigns each of ~1000 sentences its own successive depth level → a ~1000-level
+// deep, one-node-wide column (the "thin line" a big doc collapsed into). The term
+// co-occurrence and similarity edges pile cycles on top. Tuning can't unbend a
+// linear chain, so instead of fighting the topology we offer layouts that suit
+// it: the free force field (in 3D, or flattened to a more legible 2D map) and a
+// structural "Layers" mode that pins each node's height by its *containment*
+// depth and lets the force field spread each band sideways — a real hierarchy,
+// driven by `part_of` alone, immune to the precedes chain and the cycles.
+type LayoutMode = "force3d" | "force2d" | "layers";
+let currentLayout: LayoutMode = "force3d";
+
+// Containment depth by node kind — the structural hierarchy the walker builds via
+// `part_of` (section ▸ paragraph ▸ sentence ▸ clause/quote/ref ▸ term ▸ entity).
+// Stratifies the Layers view: shallow = high, deep = low.
+const KIND_LAYER: Record<NodeKind, number> = {
+  section: 0,
+  paragraph: 1,
+  sentence: 2,
+  clause: 3,
+  quote: 3,
+  reference: 3,
+  term: 4,
+  character: 5,
+  place: 5,
+  concept: 5,
+  event: 5,
+  object: 5,
+  group: 5,
+};
+const MAX_LAYER = 5;
+
+// Vertical gap between structural bands. Scales with graph size so the bands stay
+// separated as the in-band force cloud spreads wider on a big doc.
+function layerGap(n: number): number {
+  return Math.max(160, Math.min(1500, Math.sqrt(n) * 30));
+}
+
+// Pin each node's Y to its structural band. Fixing fy holds the height while
+// leaving x/z free for the force field to spread the band into a plane — crisp
+// strata instead of the force ball. Re-applied as the build streams in new nodes
+// (see commit()), since freshly added nodes arrive unpinned.
+function pinLayers(nodes: readonly NodeObject[]): void {
+  const gap = layerGap(nodes.length);
+  for (const ro of nodes) {
+    const layer = KIND_LAYER[asNode(ro).kind] ?? MAX_LAYER;
+    ro.fy = (MAX_LAYER / 2 - layer) * gap;
+  }
+}
+// Release the Y pins (undefined = "not fixed" to d3) when leaving Layers mode.
+function unpinLayers(nodes: readonly NodeObject[]): void {
+  for (const ro of nodes) ro.fy = undefined;
+}
 
 function applyLayout(mode: LayoutMode): void {
-  if (mode === "force") {
-    // dagMode(null) returns to the free 3D force layout. The lib accepts null at
-    // runtime to disable hierarchy, though its typings only list the active modes.
-    (graph.dagMode as (m: null) => unknown)(null);
+  currentLayout = mode;
+  const data = graph.graphData();
+  if (mode === "layers") {
+    pinLayers(data.nodes);
     graph.numDimensions(3);
   } else {
-    graph.numDimensions(3).dagLevelDistance(mode === "radialout" ? 44 : 60).dagMode(mode);
+    unpinLayers(data.nodes); // clear any pins left over from a prior Layers pass
+    graph.numDimensions(mode === "force2d" ? 2 : 3);
   }
+  applyForceTuning(data.nodes.length);
   graph.d3ReheatSimulation();
   // Let the new layout take a few ticks, then frame it.
   window.setTimeout(() => graph.zoomToFit(700, 80), 450);
@@ -709,6 +775,7 @@ function startBuild(source: BuildSource): void {
   statsEl.textContent = `${source.nodeCount} nodes · ${source.edgeCount} edges (${source.origin})`;
   renderRouting(source); // B5 — surface the class + resolved pipeline / downgrade
   setSemanticPending(false); // cleared now; turned on below if a delta is pending
+  applyForceTuning(source.nodeCount); // size the force field for the (final) spine
   // B4 — offer "find by meaning" only on a build that can actually embed.
   const meaningOn = Boolean(source.routing?.capabilities.vectordb);
   meaningSearchEl.classList.toggle("hidden", !meaningOn);
@@ -729,6 +796,9 @@ function startBuild(source: BuildSource): void {
       nodes: nodes as unknown as NodeObject[],
       links: edges as unknown as LinkObject[],
     });
+    // Layers mode pins Y by structural depth; nodes just streamed in arrive
+    // unpinned, so re-pin the live set each commit to keep the strata crisp.
+    if (currentLayout === "layers") pinLayers(graph.graphData().nodes);
     renderSidebar(nodes); // D3 — unfold the document in step with the graph
   };
   const flushApply = (): void => {
@@ -815,6 +885,7 @@ function startBuild(source: BuildSource): void {
           source.nodeCount += delta.nodeCount;
           source.edgeCount += delta.edgeCount;
           statsEl.textContent = `${source.nodeCount} nodes · ${source.edgeCount} edges (${source.origin})`;
+          applyForceTuning(source.nodeCount); // re-size the field for the grown graph
         }
       })
       .catch((err) => console.error("semantic delta failed:", err))
