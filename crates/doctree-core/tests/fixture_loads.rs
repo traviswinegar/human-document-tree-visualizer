@@ -3,8 +3,10 @@
 //! always deserialize and validate against the canonical schema.
 
 use doctree_core::schema::{Graph, NodeKind, Provenance};
+use doctree_core::walker;
 
 const SAMPLE: &str = include_str!("../../../fixtures/sample-narrative.graph.json");
+const SAMPLE_TEXT: &str = include_str!("../../../fixtures/sample-narrative.txt");
 
 #[test]
 fn sample_narrative_fixture_is_schema_valid() {
@@ -34,4 +36,42 @@ fn sample_narrative_fixture_is_schema_valid() {
         .nodes
         .iter()
         .any(|n| n.provenance == Provenance::Semantic && n.kind == NodeKind::Character));
+}
+
+#[test]
+fn walking_the_sample_text_yields_a_valid_nontrivial_spine() {
+    let g = walker::walk(SAMPLE_TEXT);
+
+    // The walker should find the heading as a section.
+    assert!(g
+        .nodes
+        .iter()
+        .any(|n| n.kind == NodeKind::Section && n.label.contains("Keeper")));
+
+    // Multiple paragraphs and a healthy number of sentences.
+    assert!(g.nodes.iter().filter(|n| n.kind == NodeKind::Paragraph).count() >= 4);
+    assert!(g.nodes.iter().filter(|n| n.kind == NodeKind::Sentence).count() >= 8);
+
+    // The dialogue line is a detected quote.
+    assert!(g.nodes.iter().any(|n| n.kind == NodeKind::Quote));
+
+    // The "[3]" marker is a detected reference.
+    assert!(g
+        .nodes
+        .iter()
+        .any(|n| n.kind == NodeKind::Reference && n.text.as_deref() == Some("[3]")));
+
+    // Recurring nouns (ship, cove, harbor, letter, cormorant) become terms.
+    let terms: Vec<&str> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Term)
+        .map(|n| n.label.as_str())
+        .collect();
+    assert!(terms.contains(&"ship"), "expected 'ship' term in {terms:?}");
+    assert!(terms.contains(&"cove"), "expected 'cove' term in {terms:?}");
+
+    // Whole spine is referentially valid and purely structural.
+    assert!(g.validate().is_empty());
+    assert!(g.nodes.iter().all(|n| n.kind.is_structural()));
 }

@@ -9,9 +9,11 @@
 
 pub mod grammar;
 pub mod schema;
+pub mod walker;
 
 pub use grammar::{graph_grammar, lint_gbnf, GRAPH_GBNF};
 pub use schema::{Edge, EdgeKind, Graph, Node, NodeKind, Provenance, Span};
+pub use walker::{walk, walk_with, WalkOptions};
 
 /// Crate name surfaced for diagnostics / the engine-health command.
 pub const CRATE_NAME: &str = "doctree-core";
