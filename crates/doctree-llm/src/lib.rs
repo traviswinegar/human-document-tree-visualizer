@@ -526,6 +526,94 @@ pub struct RagHit {
     pub score: f32,
 }
 
+/// GGUF filenames discovery prefers, in **descending** priority. The first one
+/// present in any [`model_search_dirs`] entry wins; if none match, that
+/// directory's first `.gguf` (sorted) is used. `qwen3-4b` is the speed/quality
+/// default (BUILD_LOG Phase 0). See [ADR-00014](../../docs/adr/ADR-00014-zero-config-model-discovery.md).
+pub const PREFERRED_MODEL_FILES: &[&str] = &[
+    "qwen3-4b-q4km.gguf",
+    "qwen3.5-9b-q4km.gguf",
+    "qwen2.5-0.5b-q4km.gguf",
+];
+
+/// Scan `dirs` in order for a usable `.gguf`, preferring [`PREFERRED_MODEL_FILES`]
+/// within each directory, then falling back to the first `.gguf` by sorted name.
+/// **Pure over its inputs** (no env / no `current_exe`), so the discovery policy
+/// is fully unit-testable against temp dirs with no native build.
+fn discover_model_in(dirs: &[std::path::PathBuf], preferred: &[&str]) -> Option<String> {
+    for dir in dirs {
+        // 1) Known good filenames, in priority order.
+        for name in preferred {
+            let p = dir.join(name);
+            if p.is_file() {
+                return Some(p.to_string_lossy().into_owned());
+            }
+        }
+        // 2) Otherwise the directory's first `.gguf`, sorted for determinism.
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut ggufs: Vec<std::path::PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.is_file()
+                        && p.extension()
+                            .and_then(|x| x.to_str())
+                            .is_some_and(|x| x.eq_ignore_ascii_case("gguf"))
+                })
+                .collect();
+            ggufs.sort();
+            if let Some(p) = ggufs.into_iter().next() {
+                return Some(p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+/// The runtime model search path, in **priority order** (portable-first):
+/// 1. next to the executable (`<exe>/` and `<exe>/models/`) — *portable*: drop a
+///    `.gguf` beside the binary and it just works, no env, no install, no PATH;
+/// 2. this app's own per-user data dir (`%LOCALAPPDATA%/human-document-tree/models/`)
+///    — reserved for a future in-app model downloader;
+/// 3. the known momusdev/webforge model cache on this machine, **derived** from
+///    `%LOCALAPPDATA%` (no hardcoded user name) — where the qwen GGUFs already live.
+///
+/// Native-free (`std::env` + path joins only). See ADR-00014.
+fn model_search_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            dirs.push(parent.to_path_buf());
+            dirs.push(parent.join("models"));
+        }
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let local = std::path::PathBuf::from(local);
+        dirs.push(local.join("human-document-tree").join("models"));
+        dirs.push(
+            local
+                .join("Packages")
+                .join("Claude_pzs8sxrjxfjjc")
+                .join("LocalCache")
+                .join("Roaming")
+                .join("com.example")
+                .join("webforge")
+                .join("webforge")
+                .join("models"),
+        );
+    }
+    dirs
+}
+
+/// Best-effort **zero-config** discovery of a local GGUF model — the fallback that
+/// lets a bare double-click load the full semantic engine without
+/// [`MODEL_PATH_ENV`]. Returns the first existing `.gguf` across
+/// [`model_search_dirs`], preferring [`PREFERRED_MODEL_FILES`]. Native-free (pure
+/// fs/env), so the resolution policy is verified by the default `cargo test`.
+pub fn discover_model_path() -> Option<String> {
+    discover_model_in(&model_search_dirs(), PREFERRED_MODEL_FILES)
+}
+
 /// Configuration for loading a local GGUF model.
 ///
 /// Native-free: this struct and its builders exist regardless of the `llm`
@@ -579,20 +667,35 @@ impl LlmConfig {
         self
     }
 
-    /// Resolve the effective model path: the explicit `model_path` if set,
-    /// otherwise the [`MODEL_PATH_ENV`] env var. `Err` if neither is present.
-    pub fn resolve_model_path(&self) -> anyhow::Result<String> {
+    /// Pure precedence resolver: explicit `model_path` **>** `env` **>**
+    /// `discovered`. Factored out of [`resolve_model_path`](Self::resolve_model_path)
+    /// so the policy is unit-testable without mutating process env vars (which is
+    /// `unsafe`/racy under the 2024 edition) and without depending on which model
+    /// files exist on the build machine. An empty `env` string is ignored.
+    fn resolve_with(
+        &self,
+        env: Option<String>,
+        discovered: Option<String>,
+    ) -> anyhow::Result<String> {
         if let Some(p) = &self.model_path {
             return Ok(p.clone());
         }
-        std::env::var(MODEL_PATH_ENV)
-            .ok()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no model path: set LlmConfig.model_path or the {MODEL_PATH_ENV} env var"
-                )
-            })
+        if let Some(p) = env.filter(|s| !s.is_empty()) {
+            return Ok(p);
+        }
+        discovered.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no model path: set LlmConfig.model_path, the {MODEL_PATH_ENV} env var, \
+                 or place a .gguf next to the executable (or in <exe>/models/)"
+            )
+        })
+    }
+
+    /// Resolve the effective model path: the explicit `model_path` if set, else
+    /// the [`MODEL_PATH_ENV`] env var, else zero-config [`discover_model_path`]
+    /// (ADR-00014). `Err` only when all three miss.
+    pub fn resolve_model_path(&self) -> anyhow::Result<String> {
+        self.resolve_with(std::env::var(MODEL_PATH_ENV).ok(), discover_model_path())
     }
 }
 
@@ -892,16 +995,100 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_path_errors_when_unset() {
-        // No explicit path and (assuming a clean test env) no env var → error,
-        // rather than silently loading nothing.
-        let c = LlmConfig {
-            model_path: None,
-            ..LlmConfig::default()
-        };
-        if std::env::var(MODEL_PATH_ENV).is_err() {
-            assert!(c.resolve_model_path().is_err());
+    fn resolve_prefers_explicit_then_env_then_discovery() {
+        // Precedence is tested through the pure `resolve_with` so it is
+        // deterministic — no env mutation, no dependency on the build machine's
+        // model files (ADR-00014).
+
+        // 1. Explicit `model_path` wins over both env and discovery.
+        let explicit = LlmConfig::default().with_model_path("X.gguf");
+        assert_eq!(
+            explicit
+                .resolve_with(Some("Y.gguf".into()), Some("Z.gguf".into()))
+                .unwrap(),
+            "X.gguf"
+        );
+
+        // 2. With no explicit path, a non-empty env var wins over discovery.
+        let none = LlmConfig::default();
+        assert_eq!(
+            none.resolve_with(Some("Y.gguf".into()), Some("Z.gguf".into()))
+                .unwrap(),
+            "Y.gguf"
+        );
+
+        // 3. An empty env string is ignored → discovery wins.
+        assert_eq!(
+            none.resolve_with(Some(String::new()), Some("Z.gguf".into()))
+                .unwrap(),
+            "Z.gguf"
+        );
+
+        // 4. Nothing anywhere → error (the old "errors when unset" guarantee,
+        //    now deterministic instead of conditional on a clean env).
+        assert!(none.resolve_with(None, None).is_err());
+    }
+
+    /// Make a unique temp dir without a tempfile dep (epoch-nanos), and write the
+    /// given empty files into it. Returns the dir; caller removes it.
+    fn temp_dir_with_files(tag: &str, files: &[&str]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "doctree-discover-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in files {
+            std::fs::write(dir.join(f), b"").unwrap();
         }
+        dir
+    }
+
+    #[test]
+    fn discover_model_in_prefers_known_names_then_first_gguf() {
+        // A dir holding two preferred models + a stray gguf + a non-gguf.
+        let dir = temp_dir_with_files(
+            "pref",
+            &[
+                "qwen2.5-0.5b-q4km.gguf",
+                "qwen3-4b-q4km.gguf",
+                "aardvark.gguf",
+                "readme.txt",
+            ],
+        );
+        // Highest-priority preferred name wins, regardless of fs ordering.
+        let got = discover_model_in(std::slice::from_ref(&dir), PREFERRED_MODEL_FILES).unwrap();
+        assert!(got.ends_with("qwen3-4b-q4km.gguf"), "preferred wins: {got}");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // No preferred names present → first `.gguf` by sorted name, never the .txt.
+        let dir = temp_dir_with_files("fallback", &["zeta.gguf", "alpha.gguf", "notes.txt"]);
+        let got = discover_model_in(std::slice::from_ref(&dir), PREFERRED_MODEL_FILES).unwrap();
+        assert!(got.ends_with("alpha.gguf"), "first sorted gguf: {got}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_model_in_honours_dir_priority_and_missing_dirs() {
+        let empty = std::env::temp_dir().join("doctree-discover-does-not-exist-xyz");
+        let _ = std::fs::remove_dir_all(&empty); // ensure absent
+        let first = temp_dir_with_files("prio-a", &["alpha.gguf"]);
+        let second = temp_dir_with_files("prio-b", &["qwen3-4b-q4km.gguf"]);
+
+        // Earlier dir wins even though a later dir has a *preferred* name: the
+        // search is dir-priority first, name-priority within a dir.
+        let dirs = vec![empty.clone(), first.clone(), second.clone()];
+        let got = discover_model_in(&dirs, PREFERRED_MODEL_FILES).unwrap();
+        assert!(got.ends_with("alpha.gguf"), "first non-empty dir wins: {got}");
+
+        // All-empty/missing → None.
+        let none = discover_model_in(&[empty], PREFERRED_MODEL_FILES);
+        assert!(none.is_none(), "missing dir yields no model");
+
+        let _ = std::fs::remove_dir_all(&first);
+        let _ = std::fs::remove_dir_all(&second);
     }
 
     #[test]
