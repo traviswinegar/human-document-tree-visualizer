@@ -1,0 +1,10 @@
+[package]
+name = "doctree-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Pure-Rust core for human-document-tree: graph schema, GBNF grammar, and the deterministic structure walker. No native, LLM, or GPU dependencies."
+
+[dependencies]
+# Intentionally empty at A1 — proves the workspace + toolchain build with zero
+# network fetch. serde arrives in A2 with the schema.
