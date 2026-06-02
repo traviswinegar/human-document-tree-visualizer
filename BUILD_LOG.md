@@ -93,11 +93,12 @@ while it compiles.
 
 ## Current Position
 
-**B1 — stand up `crates/doctree-llm`: optional `momusdev_llm` dependency behind a
-`llm` feature (cuda/vulkan/vectordb sub-features), a thin `InferenceEngine`
-wrapper, and a default workspace build that stays green with zero native deps.**
-Stream A native-free core complete (A1–A4); kicking the long CUDA compile in the
-background per the interleave plan.
+**A6 — 3D render interactions on the fixture: color-by-type (done in A5), force
+layout, orbit/zoom/pan, node search, drag, animated/directional edges, reset
+view.** Stream A native-free core complete (A1–A5) and the gated LLM crate stands
+up (B1). GPU acceleration is blocked by the bleeding-edge toolchain (logged under
+Catch-all for user sign-off); CPU inference is the working path and unblocks all
+functional LLM acceptance (B2/B3/B5).
 
 ---
 
@@ -113,12 +114,37 @@ background per the interleave plan.
   Open risk: `inference.rs` warns the GBNF parser rejects ~5+ alternatives in one production; the 6-alt `nodekind`/`edgekind` rules must be re-verified at first real grammar compile (B2).
 - **A4** — deterministic structure walker (the graph spine).
   Commit `81805da` · tests `crates/doctree-core/src/walker.rs::tests::*` (13, incl. `walk_is_deterministic`, `spine_graph_is_referentially_valid`) + `crates/doctree-core/tests/fixture_loads.rs::walking_the_sample_text_yields_a_valid_nontrivial_spine` · src `crates/doctree-core/src/walker.rs` (`walk`, `walk_with`, `WalkOptions`).
+- **B1** — `doctree-llm` crate: optional `momusdev_llm` dep behind an `llm`
+  feature (cuda/vulkan/vectordb sub-features), native-free by default.
+  Commit `8c14fdd` · tests `crates/doctree-llm/src/lib.rs::tests::*` (5, incl. config defaults + `from_env` + `graph_extraction_grammar` ↔ `doctree_core::GRAPH_GBNF`) · src `crates/doctree-llm/src/lib.rs` (`LlmConfig`, `Completion`, `graph_extraction_grammar`, gated `mod engine::Engine`).
+  Verified: default `cargo test` workspace green with ZERO native deps; gated `cargo build -p doctree-llm --features llm` compiles clean against the real `momusdev_llm` API (CPU `inference`, ~52 s). GPU sub-features (`cuda`/`vulkan`) do NOT build on this machine — see Catch-all backlog; CPU is the working path for B2/B3.
+- **A5** — frontend scaffold (Vite + TS + 3d-force-graph) renders the fixture.
+  Commit `95f224b` · test `npx tsc --noEmit` (exit 0) + `npm run build` (tsc && vite build, exit 0); runtime render confirmed via dev-handle scene introspection (32 three.js meshes = 13 node spheres + 18 link cylinders + interaction mesh; canvas 1280×720; WebGL2 live; zero console errors) · src `src/main.ts` (graph construction, explicit `width()/height()` at init), `src/types.ts` (mirrors `schema.rs`), `src/colors.ts` (palette).
+  Note: `preview_screenshot` times out against the continuously-animating WebGL canvas (the rAF render loop never idles) — a tooling limitation, not an app defect; render verified by introspection instead.
 
 ---
 
 ## Catch-all backlog (off-topic discoveries — provenance noted, never fixed inline)
 
-- _(none yet)_
+- **GPU acceleration blocked by bleeding-edge toolchain — needs user sign-off on a
+  fix path.** _(discovered while building B1's gated native LLM layer.)_ The CPU
+  `inference` feature builds and is the working path for all LLM acceptance
+  (B2/B3/B5). Both GPU backends fail on this exact machine:
+  - **CUDA 13.1 ✗ VS 2026.** `llama-cpp-sys-2` → nvcc rejects the compiler:
+    `host_config.h(164): fatal error C1189: unsupported Microsoft Visual Studio
+    version! Only versions between 2019 and 2022 supported`. The
+    `-allow-unsupported-compiler` override (CUDAFLAGS / NVCC_PREPEND_FLAGS) does
+    not reach CMake's compiler-detection try-compile, so it doesn't help.
+  - **Vulkan ✗ MSVC 14.50.** llama.cpp's `vulkan-shaders-gen` ExternalProject
+    fails under this MSVC: the `-Brepro` flag triggers
+    `fatal error C1083: Cannot open compiler generated file: '': Invalid argument`.
+    (Ninja-vs-MSBuild generator juggling didn't get past it.)
+  - **Fix options for the user to choose:** (a) install a VS 2019–2022 toolset
+    alongside VS 2026 and point CUDA at it (unblocks `cuda`); (b) wait for a
+    newer CUDA / llama-cpp-2 that supports MSVC 19.50; (c) ship CPU-only for now
+    (RTX 3060 Ti idle). Recommend (c) now, (a) when GPU speed is wanted — the
+    crate already gates `cuda`/`vulkan` behind features, so enabling later is a
+    flag flip, no code change.
 
 ---
 
