@@ -1,0 +1,31 @@
+[package]
+name = "doctree-llm"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Gated local-LLM semantic layer for human-document-tree (ADR-0001 decoupling)."
+
+[features]
+# Default is native-free: the crate compiles and tests with ZERO native deps so
+# `cargo test` (and the whole default workspace build) runs anywhere. The engine
+# itself is gated behind `llm`. This is the load-bearing decoupling invariant
+# from ADR-0001 — a failed CUDA/native build must never block Stream A.
+default = []
+# Pull in the momusdev_llm engine with CPU inference (llama-cpp-2). Needs a C++
+# toolchain (MSVC + CMake) on PATH to build the native llama.cpp.
+llm = ["dep:momusdev_llm", "momusdev_llm/inference"]
+# GPU backends — each implies `llm` and cascades to the matching momusdev_llm /
+# llama-cpp-2 feature. Pick at most one per build (mutually exclusive at link).
+cuda = ["llm", "momusdev_llm/cuda"]
+vulkan = ["llm", "momusdev_llm/vulkan"]
+# Embeddings + LanceDB vector store (heavy: ort/ONNX, aws-lc). For B4.
+vectordb = ["llm", "momusdev_llm/vectordb"]
+
+[dependencies]
+doctree-core = { path = "../doctree-core" }
+anyhow.workspace = true
+
+# The local-LLM engine. Optional + default-features=false so the dependency
+# graph stays native-free unless a feature above turns it on. Path dep on the
+# user's shared sibling crate — consumed read-only, never modified (ADR-0001).
+momusdev_llm = { path = "E:/Development/momusdev-packages/momusdev_llm", optional = true, default-features = false }
