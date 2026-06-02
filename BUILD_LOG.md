@@ -106,9 +106,26 @@ native-free).
 
 ## Current Position
 
-**All build-order steps complete — #29 (frontend wiring) just landed; only
-explicitly-deferred / blocked items remain.** The autonomous "finish the rest of
-your known plans and deferred items" mandate has reached its natural floor: every
+**Phase 5 active (opened 2026-06-02) — four user-driven asks landed while running
+the desktop app on a 650 KB / 400-page novel (18 437 nodes / 46 477 edges).** Plan
+`docs/plans/PLAN-phase5-save-pdf-bundling.md` sequences them by risk: **#1**
+clear-on-open + elapsed timer (ADR-free) → **#3** PDF ingestion (ADR-0006) → **#4**
+save/load/CRUD library (ADR-0007) → **#2** edge bundling (plan-doc now; ADR when the
+merged-geometry version lands). Substrate (the plan + ADR-0006 + ADR-0007) shipped
+as `Phase 5 #45` (commit `5b54e0d`). **#1 just landed (`Phase 5 #46`, commit
+`36b3a56`):** `loadAndBuild` now clears the canvas + sidebar + stats panel *before*
+awaiting the walk (the old graph no longer lingers through a slow semantic walk
+looking like a hang), and a live `#elapsed` readout in the left rail ticks from
+open through walk → build → semantic-weave and freezes at the total (stops on the
+structural `done`, or — when a model-backed delta is in flight — in that delta's
+`.finally`). Frontend-only, native-free. **Next: #3 (PDF ingestion via frontend
+`pdfjs-dist`, dynamically imported — ADR-0006).** Then #4, then #2. The standing
+autonomous mandate covers this whole phase (test at the end, commit locally, never
+push). Below is the prior position, retained as history.
+
+**[History] All build-order steps complete — #29 (frontend wiring) landed; only
+explicitly-deferred / blocked items remained at that point.** The autonomous "finish
+the rest of your known plans and deferred items" mandate has reached its natural floor: every
 walk-plan unit (A1–A8, B1–B5, C1, D1–D4) plus the dual-pipeline benchmark (#20)
 plus the deferred frontend-integration pass (#29) is shipped and verified. What's
 left in the backlog is, by construction, either **blocked on user sign-off** (GPU
@@ -338,6 +355,10 @@ autonomously):**
   Commit `67cdd33` · test `npx tsc --noEmit` (exit 0) + `npm run build` (exit 0 — 397 modules, `dist/` emitted; only the pre-existing >500 kB advisory) — the standing frontend gate (no JS test runner has ever existed; every A5–D4 / #29–#41 frontend phase verified this same way) · src `src/main.ts` (new `renderStats(nodes, edges)` computes node-kind composition, edge-kind connections + an edge-provenance split, shape ratios `words`/`words-per-sentence`/`clauses-per-sentence`/`sentences-per-paragraph`/`edges-per-node`, and degree-ranked key terms — all from the on-screen arrays via the existing `idOf`, walked in fixed `NODE_KIND_ORDER`/`EDGE_KIND_ORDER`/`PROV_ORDER` so rows don't reshuffle as the spine streams; called from `commit` alongside `renderSidebar`; reset to "analyzing…" in `startBuild`; `EdgeKind` added to the type import; new `statsBodyEl`/`statsCollapseEl`/`statsReopenEl`/`playbackEl` refs; `layoutGraph` reworked so the canvas is the *middle* column — subtracts both `LEFT_W=300` and `SIDEBAR_W=360`, sets `container.style.left`, and shifts `playbackEl.style.left`; new `setStats(open)` mirrors `setSidebar`; key-term chips delegate clicks to `selectNodeById`), `index.html` (the floating `#hud` becomes a docked `<aside id="stats-panel">` with `#stats-header` [title + `#stats-collapse`], `#stats-meta` [the unchanged `#stats`/`#routing`/`#semantic-status` ids], and a scrollable `#stats-body`; `#stats-reopen` tab; `#graph` → `position:absolute` with a `left` transition; playback gains a `left` transition; panel + stat-row/metric/prov/term-chip CSS mirroring the sidebar).
   Root cause (why a panel, not a tweak): #41 made the *layout* legible but the graph still answered no quantitative questions — how much of this 1800-node graph is sentences vs terms, how much of the edge mass is the deterministic spine vs the inferred semantic overlay, how dense is it, which terms are the hubs. The metrics are deliberately computed frontend-side (not via the native `doctree-core::metrics` `graph_metrics`) so they render on every path including the browser-WASM and fixture builds where no Tauri command exists, and so they update live as the build streams rather than only at the end. Vocabulary mirrors `metrics.rs` (counts by node kind / edge kind / provenance; `edges/node` is that module's `edge_density`).
   Verified: `npx tsc --noEmit` exit 0; `npm run build` exit 0 (397 modules, `dist/` emitted; only the pre-existing >500 kB chunk advisory, unrelated). Frontend-only; default build stays **native-free** (pure TS — no new deps). The perceptual confirmation (does the panel read well and the numbers look right on the 100k-word doc) is the user's desktop end test — the Tauri webview isn't screenshot/MCP-introspectable (the documented A5–D4 tooling limit).
+- **#46** — clear-on-open + live elapsed timer (Phase 5 item #1). _No ADR — frontend UX polish on an already-decided pipeline (cf. #30/#35/#39/#41/#43, also ADR-free); no new load-bearing choice, no new deps. First of the four Phase 5 asks (plan `docs/plans/PLAN-phase5-save-pdf-bundling.md`), sequenced first as the lowest-risk._ User (running the desktop app on a 650 KB / 400-page novel, 18 437 nodes / 46 477 edges): "When a new document is opened, we should immediately clear the screen and data. I want to see a timer somewhere so that it's clearly work is being done and time is actually elapsing."
+  Commit `36b3a56` · test `npx tsc --noEmit` (exit 0) + `npm run build` (exit 0 — 397 modules, `dist/` emitted; only the pre-existing >500 kB advisory) — the standing frontend gate (no JS test runner has ever existed; every A5–D4 / #29–#43 frontend phase verified this same way) · src `src/main.ts` (`loadAndBuild` now pauses the old player, cancels the trailing apply, clears search/details/doc-active, empties `graphData` + sidebar + stats-body, and calls the new `startElapsed()` **before** the `await loadBuildSource` — so the old doc vanishes the instant a new one opens instead of lingering through the walk; new `startElapsed`/`stopElapsed`/`fmtElapsed` drive a 100 ms-tick `#elapsed` readout; `startBuild` captures `hasPendingDelta` and stops the timer on the structural `done` only when no model-backed delta is in flight; the `pendingDelta.finally` stops it on the semantic path; the walk-failure `catch` freezes it too), `index.html` (`#elapsed` line at the top of `#stats-meta` + its CSS — tabular figures, a green `.running` state that cools to blue on freeze).
+  Root cause (why it read as a hang): `loadAndBuild` set "walking…" text but left the *previous* document's full graph on screen, then `startBuild` only cleared `graphData` **after** `await loadBuildSource` resolved — so during a slow desktop semantic walk (tens of seconds to minutes on the 650 KB novel) the old graph sat there motionless with no elapsed feedback, indistinguishable from a freeze. The fix clears before the await and starts a timer that survives the whole walk → build → semantic-weave arc: it must *not* stop on the structural `done` when a `pendingDelta` is pending (the genuinely slow CPU phase is still running), so it freezes in that delta's `.finally` instead, and only stops on `done` for the pure structural path.
+  Verified: `npx tsc --noEmit` exit 0; `npm run build` exit 0 (397 modules, `dist/` emitted; only the pre-existing >500 kB chunk advisory, unrelated). Frontend-only; default build stays **native-free** (pure TS — no new deps). The perceptual confirmation (old graph clears at once on open; the number ticks up through the walk and semantic weave; freezes at the total) is the user's desktop end test — the Tauri webview isn't screenshot/MCP-introspectable (the documented A5–D4 tooling limit).
 
 ---
 
