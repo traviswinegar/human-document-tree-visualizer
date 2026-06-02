@@ -93,12 +93,16 @@ while it compiles.
 
 ## Current Position
 
-**A7 — live animated build + replay: stream the spine in build order so the graph
-grows on screen, record the ordered build, and replay it; explorable after.**
-Stream A render path complete (A1–A6): the fixture renders and is fully
-interactive (search/focus/particles/reset). Next, drive the graph from an ordered
-event stream instead of one static `graphData()` load (this is the frontend half
-that A8's Tauri walker stream will later feed). GPU still CPU-only (Catch-all).
+**A8 — Tauri wiring: a desktop command runs the deterministic walker on a real
+document and streams the ordered spine to the frontend (no LLM), so it's an
+end-to-end doc→animated graph.** Stream A frontend is complete and fully
+interactive with an animated build+replay driven by an ordered event stream
+(A1–A7). A8 connects that frontend stream path to a real backend: stand up the
+`src-tauri` app crate, expose walk + streaming commands over `doctree-core`, and
+have the frontend consume Tauri events (with the in-browser fixture as fallback).
+Note: the GUI window itself can't be launched/screenshotted in this headless
+environment — compile + Rust unit tests + browser-fallback are what I can verify;
+the live desktop window is the user's end test. GPU still CPU-only (Catch-all).
 
 ---
 
@@ -124,6 +128,9 @@ that A8's Tauri walker stream will later feed). GPU still CPU-only (Catch-all).
 - **A6** — 3D render interactions (search + focus + animated edges + reset).
   Commit `b33181b` · test `npx tsc --noEmit` + `npm run build` (both exit 0); runtime verified via dev-handle introspection: search "mara"→2 matches (`sent:1`,`char:mara`), 11 nodes + 17 links dimmed to low alpha; "vane"→2 (`sent:2`,`char:vane`); focus tween moves the camera toward the matched node; reset re-fits; scene = 42 meshes (13 nodes + 18 link cylinders + 10 semantic directional particles + interaction mesh) · src `src/main.ts` (`runSearch`, `focusNode`, `resetView`, highlight-aware `nodeColor`/`linkColor`, `linkDirectionalParticles`), `index.html` (search box + reset button).
   Note: precise *settled* camera coordinate not asserted — eval polling loops time out against the animating canvas; camera-moves-toward-node and reset-re-fits were both confirmed directly.
+- **A7** — live animated build + replay (frontend stream path).
+  Commit `79034bc` · test `npx tsc --noEmit` + `npm run build` (both exit 0); runtime verified via dev handles (`__doctreePlayer`, `__doctreeBuildSequence`): sequence deterministic across runs and valid (no edge precedes its endpoints), 13 node + 18 edge events = 31; build visibly grows (7→13 nodes mid-run); Replay resets to 0 and regrows; "harbor"→2 matches after completion; done-state button reads "Replay" · src `src/build-player.ts` (`buildSequence`, `createBuildPlayer`), `src/main.ts` (empty-start + player wiring), `index.html` (Play/Pause + Replay).
+  Note: build runs slower than the nominal 220 ms/step — per-step `graphData()` reheats + periodic `zoomToFit` load the main thread, delaying the timer; visually fine (graph grows over ~15 s). Ordering currently lives only in the frontend; A8 makes the Rust walker stream authoritative.
 
 ---
 
