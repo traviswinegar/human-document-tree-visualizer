@@ -1,13 +1,9 @@
 import ForceGraph3D from "3d-force-graph";
 import type { NodeObject, LinkObject } from "3d-force-graph";
-import fixtureJson from "../fixtures/sample-narrative.graph.json";
-import type { DocGraph, GraphNode, GraphEdge } from "./types";
+import type { GraphNode, GraphEdge } from "./types";
 import { nodeColor, nodeSize, edgeColor } from "./colors";
 import { buildSequence, createBuildPlayer } from "./build-player";
-
-// The shared fixture (ADR-0001 render target). Imported at build time so the
-// scaffold renders something real before the Tauri walker stream exists (A8).
-const fixture = fixtureJson as unknown as DocGraph;
+import { loadBuildSource } from "./doc-source";
 
 // 3d-force-graph's accessors hand back the library's NodeObject/LinkObject; our
 // schema props ride along on the same objects, so we narrow with a cast.
@@ -77,8 +73,6 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
   .linkDirectionalParticleSpeed(0.006)
   .linkDirectionalParticleWidth(1.4);
 
-statsEl.textContent = `${fixture.nodes.length} nodes · ${fixture.edges.length} edges (fixture)`;
-
 // Re-assigning the accessors is how 3d-force-graph is told to re-evaluate node /
 // link materials after the highlight state changes.
 function refresh(): void {
@@ -143,55 +137,64 @@ window.addEventListener("resize", () => {
   graph.width(window.innerWidth).height(window.innerHeight);
 });
 
-// --- A7: animated build + replay -------------------------------------------
-const sequence = buildSequence(fixture);
+// --- A8: animated build from the live source (Tauri walker, or fixture) ------
+// The sequence is resolved asynchronously: in the Tauri shell it's the live
+// Rust walk of the document; in a plain browser it's the baked fixture. Either
+// way it's the same BuildEvent[] the player consumes, so everything below the
+// await is origin-agnostic.
+async function initBuild(): Promise<void> {
+  const source = await loadBuildSource();
+  statsEl.textContent = `${source.nodeCount} nodes · ${source.edgeCount} edges (${source.origin})`;
 
-const player = createBuildPlayer({
-  sequence,
-  intervalMs: 220,
-  apply: (nodes, edges) => {
-    graph.graphData({
-      nodes: nodes as unknown as NodeObject[],
-      links: edges as unknown as LinkObject[],
-    });
-  },
-  onProgress: (step, total, done) => {
-    playPauseEl.textContent = player.isPlaying() ? "Pause" : done ? "Replay" : "Play";
-    buildProgressEl.textContent = done
-      ? "build complete — explore"
-      : `building ${step}/${total}`;
-    // Keep the growing graph framed while the build runs; settle on completion.
-    if (done) graph.zoomToFit(800, 80);
-    else if (step % 4 === 0) graph.zoomToFit(500, 80);
-  },
-});
-
-playPauseEl.addEventListener("click", () => {
-  // After completion the button replays; otherwise it toggles play/pause.
-  if (player.isDone()) player.replay();
-  else player.toggle();
-  playPauseEl.textContent = player.isPlaying() ? "Pause" : "Play";
-});
-replayEl.addEventListener("click", () => {
-  searchEl.value = "";
-  searchActive = false;
-  matched.clear();
-  searchCountEl.textContent = "";
-  refresh();
-  player.replay();
-});
-
-player.play();
-
-// Dev-only handle so the running 3D scene is inspectable from the page console /
-// preview tooling (WebGL canvases can't be verified via readPixels under the
-// default preserveDrawingBuffer:false). Stripped from production builds.
-if (import.meta.env.DEV) {
-  Object.assign(window as object, {
-    __doctreeGraph: graph,
-    __doctreePlayer: player,
-    __doctreeSequence: sequence,
-    __doctreeBuildSequence: buildSequence,
-    __doctreeFixture: fixture,
+  const player = createBuildPlayer({
+    sequence: source.sequence,
+    intervalMs: 220,
+    apply: (nodes, edges) => {
+      graph.graphData({
+        nodes: nodes as unknown as NodeObject[],
+        links: edges as unknown as LinkObject[],
+      });
+    },
+    onProgress: (step, total, done) => {
+      playPauseEl.textContent = player.isPlaying() ? "Pause" : done ? "Replay" : "Play";
+      buildProgressEl.textContent = done
+        ? "build complete — explore"
+        : `building ${step}/${total}`;
+      // Keep the growing graph framed while the build runs; settle on completion.
+      if (done) graph.zoomToFit(800, 80);
+      else if (step % 4 === 0) graph.zoomToFit(500, 80);
+    },
   });
+
+  playPauseEl.addEventListener("click", () => {
+    // After completion the button replays; otherwise it toggles play/pause.
+    if (player.isDone()) player.replay();
+    else player.toggle();
+    playPauseEl.textContent = player.isPlaying() ? "Pause" : "Play";
+  });
+  replayEl.addEventListener("click", () => {
+    searchEl.value = "";
+    searchActive = false;
+    matched.clear();
+    searchCountEl.textContent = "";
+    refresh();
+    player.replay();
+  });
+
+  player.play();
+
+  // Dev-only handle so the running 3D scene is inspectable from the page console
+  // / preview tooling (WebGL canvases can't be verified via readPixels under the
+  // default preserveDrawingBuffer:false). Stripped from production builds.
+  if (import.meta.env.DEV) {
+    Object.assign(window as object, {
+      __doctreeGraph: graph,
+      __doctreePlayer: player,
+      __doctreeSequence: source.sequence,
+      __doctreeBuildSequence: buildSequence,
+      __doctreeSource: source,
+    });
+  }
 }
+
+void initBuild();

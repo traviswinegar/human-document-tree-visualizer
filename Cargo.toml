@@ -3,7 +3,7 @@
 # to load). src-tauri arrives in a later step.
 [workspace]
 resolver = "2"
-members = ["crates/doctree-core", "crates/doctree-llm"]
+members = ["crates/doctree-core", "crates/doctree-llm", "src-tauri"]
 
 [workspace.package]
 edition = "2021"

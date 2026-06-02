@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core capability for the main window. App commands (walk_document, build_steps) are exposed via generate_handler! and need no extra ACL grant; only Tauri's own core APIs are listed here.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

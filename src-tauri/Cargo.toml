@@ -1,0 +1,23 @@
+[package]
+name = "doctree-tauri"
+description = "human-document-tree desktop shell (Tauri v2) — doc → walker → 3D graph"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# The library holds the app logic + commands; main.rs is a thin launcher. The
+# extra crate types are what Tauri's mobile/desktop tooling links against.
+[lib]
+name = "doctree_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Backend depends on the pure core only — no LLM/GPU — so the desktop shell
+# builds with zero native deps (ADR-0001 decoupling invariant).
+doctree-core = { path = "../crates/doctree-core" }
