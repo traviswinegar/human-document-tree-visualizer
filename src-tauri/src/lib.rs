@@ -26,6 +26,11 @@ use serde::{Deserialize, Serialize};
 /// crate's integration tests.
 pub mod llm;
 
+/// Phase 5 #4 (ADR-0007) — on-disk persistence of saved graphs (save / list /
+/// load / delete / rename). Schema-agnostic (opaque `serde_json::Value`), native-
+/// free; the pure helpers + fs round-trips are unit-tested headlessly.
+pub mod library;
+
 /// Frontend-supplied walk tunables. Mirrors [`WalkOptions`]; every field is
 /// optional so the frontend can send `{}` (or omit the argument) and get the
 /// conservative defaults. Kept as its own type rather than reusing
@@ -235,7 +240,12 @@ pub fn run() {
             llm::llm_complete,
             llm::semantic_build_steps,
             llm::embedded_build_steps,
-            llm::semantic_search
+            llm::semantic_search,
+            library::save_doc,
+            library::list_docs,
+            library::load_doc,
+            library::delete_doc,
+            library::rename_doc
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

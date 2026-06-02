@@ -11,9 +11,20 @@ import {
   loadBuildSource,
   searchByMeaning,
   defaultDocument,
+  isTauri,
   type BuildSource,
   type ResolvedPipeline,
 } from "./doc-source";
+import {
+  saveDoc,
+  listDocs,
+  loadDoc,
+  deleteDoc,
+  renameDoc,
+  type SavedDoc,
+  type SavedMeta,
+  type SavedPosition,
+} from "./library";
 
 // 3d-force-graph's accessors hand back the library's NodeObject/LinkObject; our
 // schema props ride along on the same objects, so we narrow with a cast.
@@ -53,6 +64,12 @@ const replayEl = document.getElementById("replay") as HTMLButtonElement;
 const buildProgressEl = document.getElementById("build-progress")!;
 const buildBarFillEl = document.getElementById("build-bar-fill")!;
 const openDocEl = document.getElementById("open-doc") as HTMLButtonElement;
+const saveDocEl = document.getElementById("save-doc") as HTMLButtonElement;
+const libraryEl = document.getElementById("library") as HTMLButtonElement;
+const libraryModalEl = document.getElementById("library-modal")!;
+const libraryBackdropEl = document.getElementById("library-backdrop")!;
+const libraryListEl = document.getElementById("library-list")!;
+const libraryCloseEl = document.getElementById("library-close") as HTMLButtonElement;
 const fileInputEl = document.getElementById("file-input") as HTMLInputElement;
 const dropHintEl = document.getElementById("drop-hint")!;
 const speedEl = document.getElementById("speed") as HTMLInputElement;
@@ -71,6 +88,18 @@ let searchActive = false;
 // The text of the document currently on screen. Tracked so the B4 meaning search
 // (which re-walks + embeds the same text on the backend) has something to query.
 let currentText = defaultDocument;
+
+// Phase 5 #4 — identity of the document on screen, for the save/library path.
+// `currentSource` is the live BuildSource (origin + routing) captured by
+// startBuild; the doc-id/name/createdAt track a *saved* graph so a re-save
+// updates it in place (id present) rather than minting a duplicate, and a fresh
+// walk resets them to null (the new doc is unsaved until the user clicks Save).
+// `currentDocLabel` seeds the save-name prompt from the opened file's name.
+let currentSource: BuildSource | null = null;
+let currentDocId: string | null = null;
+let currentDocName: string | null = null;
+let currentDocCreatedAt: string | null = null;
+let currentDocLabel: string | null = null;
 
 // Human labels for the resolved pipeline shown on the B5 routing line.
 const PIPELINE_LABEL: Record<ResolvedPipeline, string> = {
@@ -252,6 +281,10 @@ function applyLayout(mode: LayoutMode): void {
     graph.numDimensions(mode === "force2d" ? 2 : 3);
   }
   applyForceTuning(data.nodes.length);
+  // A restored saved graph freezes the sim (cooldownTicks 0) to hold its exact
+  // layout; a deliberate layout switch is the user asking to reflow, so re-enable
+  // ticking before reheating or the reheat would be a no-op.
+  graph.cooldownTicks(Infinity);
   graph.d3ReheatSimulation();
   // Let the new layout take a few ticks, then frame it.
   window.setTimeout(() => graph.zoomToFit(700, 80), 450);
@@ -971,10 +1004,16 @@ function startBuild(source: BuildSource): void {
   // past the structural `done` and stops only when that delta settles (below);
   // on the pure structural path it stops on `done`.
   const hasPendingDelta = Boolean(source.pendingDelta);
+  currentSource = source; // Phase 5 #4 — what a Save would serialize (origin + routing)
   player?.pause();
   cancelPendingApply?.(); // drop any trailing apply still queued from the old build
   cancelPendingApply = null;
   clearSearch();
+  // A prior restore may have frozen the sim (cooldownTicks 0) to hold a saved
+  // layout; a fresh build must animate, so re-enable ticking (it still settles
+  // via cooldownTime). Without this, a build started after opening a saved graph
+  // would stack every node at the origin.
+  graph.cooldownTicks(Infinity);
   graph.graphData({ nodes: [], links: [] });
   sidebarDocEl.innerHTML = '<div class="doc-empty">building…</div>';
   statsBodyEl.innerHTML = '<div class="stat-empty">analyzing…</div>';
@@ -1151,6 +1190,13 @@ async function loadAndBuild(text?: string, label?: string): Promise<void> {
   statsBodyEl.innerHTML = '<div class="stat-empty">walking…</div>';
   statsEl.textContent = label ? `walking ${label}…` : "walking…";
   currentText = text ?? defaultDocument; // remember it for the meaning search
+  // Phase 5 #4 — a freshly walked document is unsaved: forget any prior saved
+  // identity (so the next Save prompts for a name and mints a new entry), and
+  // seed the name prompt from the opened file's label.
+  currentDocId = null;
+  currentDocName = null;
+  currentDocCreatedAt = null;
+  currentDocLabel = label ?? null;
   try {
     const source = await loadBuildSource(text);
     startBuild(source);
@@ -1210,6 +1256,318 @@ function ingestFile(file: File): void {
     statsEl.textContent = `could not read ${file.name}`;
   };
   reader.readAsText(file);
+}
+
+// --- Phase 5 #4 (ADR-0007): save / load / library --------------------------
+// "I don't want to regraph every time." A built graph (spine + any woven semantic
+// layer + the force-laid positions) is serialized to the desktop library and can
+// be reopened instantly — no re-walk, no re-simulation. Desktop-only: the five
+// commands go over Tauri IPC, so the Save/Library buttons are revealed only in
+// the shell (the browser/WASM build has no disk to persist to).
+
+// Stop and blank the elapsed readout (a restore does no walk, so there's no time
+// to show — distinct from stopElapsed(), which freezes a real elapsed total).
+function clearElapsed(): void {
+  if (elapsedTimer !== null) {
+    window.clearInterval(elapsedTimer);
+    elapsedTimer = null;
+  }
+  elapsedEl.classList.remove("running");
+  elapsedEl.textContent = "";
+}
+
+// Snapshot the live graph into clean, serializable arrays: strip 3d-force-graph's
+// runtime fields (three.js objects, velocities, indices) down to our schema, pull
+// each node's resting x/y/z into a positions map (so the layout restores exactly),
+// and collapse edge endpoints back to id strings (graphData() resolves them to
+// node objects in place).
+function snapshotGraph(): {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  positions: Record<string, SavedPosition>;
+} {
+  const data = graph.graphData();
+  const nodes: GraphNode[] = [];
+  const positions: Record<string, SavedPosition> = {};
+  for (const ro of data.nodes) {
+    const n = asNode(ro);
+    const clean: GraphNode = {
+      id: n.id,
+      kind: n.kind,
+      label: n.label,
+      provenance: n.provenance,
+    };
+    if (n.text !== undefined) clean.text = n.text;
+    if (n.span !== undefined) clean.span = n.span;
+    nodes.push(clean);
+    const { x, y, z } = ro;
+    if (typeof x === "number" && typeof y === "number" && typeof z === "number") {
+      positions[n.id] = { x, y, z };
+    }
+  }
+  const edges: GraphEdge[] = [];
+  for (const l of data.links) {
+    const e = asLink(l);
+    const clean: GraphEdge = {
+      source: idOf(e.source),
+      target: idOf(e.target),
+      kind: e.kind,
+      provenance: e.provenance,
+    };
+    if (e.id !== undefined) clean.id = e.id;
+    if (e.label !== undefined) clean.label = e.label;
+    if (e.weight !== undefined) clean.weight = e.weight;
+    edges.push(clean);
+  }
+  return { nodes, edges, positions };
+}
+
+// Assemble the full SavedDoc payload from the live graph + the tracked identity.
+// Re-using `currentDocCreatedAt` keeps the original timestamp across re-saves; the
+// backend mints the id when absent and writes it back.
+function buildSavedDoc(name: string): SavedDoc {
+  const snap = snapshotGraph();
+  const now = new Date().toISOString();
+  const doc: SavedDoc = {
+    schemaVersion: 1,
+    name,
+    createdAt: currentDocCreatedAt ?? now,
+    updatedAt: now,
+    origin: currentSource?.origin ?? "unknown",
+    text: currentText,
+    nodes: snap.nodes,
+    edges: snap.edges,
+    positions: snap.positions,
+    layout: currentLayout,
+  };
+  if (currentDocId) doc.id = currentDocId;
+  if (currentSource?.routing) doc.routing = currentSource.routing;
+  return doc;
+}
+
+// Brief, transient feedback on the Save button (it returns to "Save" after a beat).
+let saveFlashTimer: number | null = null;
+function flashSave(msg: string): void {
+  saveDocEl.textContent = msg;
+  if (saveFlashTimer !== null) window.clearTimeout(saveFlashTimer);
+  saveFlashTimer = window.setTimeout(() => {
+    saveDocEl.textContent = "Save";
+    saveFlashTimer = null;
+  }, 1500);
+}
+
+// Save the current graph. First save prompts for a name (seeded from the opened
+// file); a re-save (id already tracked) updates in place silently.
+async function doSave(): Promise<void> {
+  if (graph.graphData().nodes.length === 0) {
+    flashSave("nothing yet");
+    return;
+  }
+  let name = currentDocName;
+  if (!currentDocId) {
+    const proposed = currentDocLabel?.replace(/\.[^.]+$/, "") || "Untitled document";
+    const entered = window.prompt("Save graph as:", proposed);
+    if (entered === null) return; // cancelled
+    name = entered.trim() || proposed;
+  }
+  const docToSave = buildSavedDoc(name ?? "Untitled document");
+  saveDocEl.disabled = true;
+  try {
+    const meta = await saveDoc(docToSave);
+    currentDocId = meta.id;
+    currentDocName = meta.name;
+    currentDocCreatedAt = docToSave.createdAt;
+    flashSave("saved ✓");
+  } catch (err) {
+    console.error("save_doc failed:", err);
+    flashSave("save failed");
+  } finally {
+    saveDocEl.disabled = false;
+  }
+}
+
+// Restore a saved graph into the scene with no re-walk and no re-simulation: feed
+// the stored nodes/edges straight in, seed each node's saved position, and freeze
+// the force sim (cooldownTicks 0) so the layout lands exactly as saved. Switching
+// the layout dropdown afterward re-enables ticking (see applyLayout).
+function restoreSavedDoc(doc: SavedDoc): void {
+  player?.pause();
+  cancelPendingApply?.();
+  cancelPendingApply = null;
+  player = null;
+  clearSearch();
+  hideDetails();
+  clearDocActive();
+  setSemanticPending(false);
+  clearElapsed();
+
+  currentText = doc.text;
+  currentDocId = doc.id ?? null;
+  currentDocName = doc.name;
+  currentDocCreatedAt = doc.createdAt ?? null;
+  currentDocLabel = doc.name;
+  // A minimal source so a subsequent Save round-trips origin + routing, and the
+  // routing line reflects the restored document.
+  currentSource = {
+    sequence: [],
+    origin: (doc.origin as BuildSource["origin"]) || "fixture",
+    nodeCount: doc.nodes.length,
+    edgeCount: doc.edges.length,
+    routing: doc.routing,
+  };
+
+  const nodeObjs = doc.nodes as unknown as NodeObject[];
+  const positions = doc.positions;
+  if (positions) {
+    for (const ro of nodeObjs) {
+      const p = positions[asNode(ro).id];
+      if (p) {
+        ro.x = p.x;
+        ro.y = p.y;
+        ro.z = p.z;
+      }
+    }
+    graph.cooldownTicks(0); // hold the exact saved layout — no reflow
+  } else {
+    graph.cooldownTicks(Infinity); // no positions saved → let the sim lay it out
+  }
+  graph.graphData({ nodes: nodeObjs, links: doc.edges as unknown as LinkObject[] });
+
+  currentLayout = (doc.layout ?? "force3d") as typeof currentLayout;
+  layoutEl.value = currentLayout;
+  graph.numDimensions(currentLayout === "force2d" ? 2 : 3);
+  if (currentLayout === "layers") pinLayers(graph.graphData().nodes);
+  applyForceTuning(doc.nodes.length);
+
+  renderSidebar(doc.nodes);
+  renderStats(doc.nodes, doc.edges);
+  statsEl.textContent = `${doc.nodes.length} nodes · ${doc.edges.length} edges (${esc(doc.name)})`;
+  renderRouting(currentSource);
+
+  // Present the playback chip as a completed, static build.
+  buildBarFillEl.style.width = "100%";
+  buildProgressEl.textContent = "saved";
+  playPauseEl.textContent = ICON_REPLAY;
+
+  graph.zoomToFit(800, 80);
+}
+
+// --- Library modal ----------------------------------------------------------
+// Holds the last-listed metas so rename/delete can prefill the prompt / confirm
+// with the graph's name.
+let libraryMetas: SavedMeta[] = [];
+
+function fmtSavedDate(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleString();
+}
+
+function renderLibrary(docs: SavedMeta[]): void {
+  libraryMetas = docs;
+  if (docs.length === 0) {
+    libraryListEl.innerHTML =
+      '<div class="lib-empty">No saved graphs yet. Build a document, then click Save.</div>';
+    return;
+  }
+  let html = "";
+  for (const d of docs) {
+    const when = fmtSavedDate(d.updatedAt);
+    const cls = d.class ? `${esc(d.class)} · ` : "";
+    const sub = `${cls}${d.nodeCount.toLocaleString()} nodes · ${d.edgeCount.toLocaleString()} edges${when ? ` · ${esc(when)}` : ""}`;
+    html += `<div class="lib-row">`;
+    html += `<div class="lib-row-main" data-action="open" data-id="${esc(d.id)}">`;
+    html += `<div class="lib-name">${esc(d.name || "Untitled")}</div>`;
+    html += `<div class="lib-sub">${sub}</div>`;
+    html += `</div>`;
+    html += `<div class="lib-actions">`;
+    html += `<button class="lib-btn" data-action="open" data-id="${esc(d.id)}">Open</button>`;
+    html += `<button class="lib-btn" data-action="rename" data-id="${esc(d.id)}">Rename</button>`;
+    html += `<button class="lib-btn lib-danger" data-action="delete" data-id="${esc(d.id)}">Delete</button>`;
+    html += `</div></div>`;
+  }
+  libraryListEl.innerHTML = html;
+}
+
+async function refreshLibrary(): Promise<void> {
+  libraryListEl.innerHTML = '<div class="lib-empty">loading…</div>';
+  try {
+    renderLibrary(await listDocs());
+  } catch (err) {
+    console.error("list_docs failed:", err);
+    libraryListEl.innerHTML = '<div class="lib-empty">could not load the library</div>';
+  }
+}
+
+function openLibrary(): void {
+  libraryModalEl.classList.remove("hidden");
+  void refreshLibrary();
+}
+function closeLibrary(): void {
+  libraryModalEl.classList.add("hidden");
+}
+
+async function openSaved(id: string): Promise<void> {
+  try {
+    const doc = await loadDoc(id);
+    restoreSavedDoc(doc);
+    closeLibrary();
+  } catch (err) {
+    console.error("load_doc failed:", err);
+    libraryListEl.innerHTML = '<div class="lib-empty">could not open that graph</div>';
+  }
+}
+
+async function renameSaved(id: string): Promise<void> {
+  const current = libraryMetas.find((m) => m.id === id)?.name ?? "";
+  const entered = window.prompt("Rename graph:", current);
+  if (entered === null) return;
+  const name = entered.trim();
+  if (!name || name === current) return;
+  try {
+    await renameDoc(id, name);
+    if (currentDocId === id) currentDocName = name;
+    await refreshLibrary();
+  } catch (err) {
+    console.error("rename_doc failed:", err);
+  }
+}
+
+async function deleteSaved(id: string): Promise<void> {
+  const name = libraryMetas.find((m) => m.id === id)?.name ?? "this graph";
+  if (!window.confirm(`Delete "${name}"? This cannot be undone.`)) return;
+  try {
+    await deleteDoc(id);
+    // The on-screen graph keeps showing, but it's no longer backed by a saved
+    // entry — drop the id so the next Save mints a fresh one.
+    if (currentDocId === id) currentDocId = null;
+    await refreshLibrary();
+  } catch (err) {
+    console.error("delete_doc failed:", err);
+  }
+}
+
+// Desktop-only: reveal Save/Library and wire them. The browser build skips this,
+// so the buttons stay hidden and the IPC functions are never called there.
+if (isTauri()) {
+  saveDocEl.classList.remove("hidden");
+  libraryEl.classList.remove("hidden");
+  saveDocEl.addEventListener("click", () => void doSave());
+  libraryEl.addEventListener("click", () => openLibrary());
+  libraryCloseEl.addEventListener("click", () => closeLibrary());
+  libraryBackdropEl.addEventListener("click", () => closeLibrary());
+  libraryListEl.addEventListener("click", (e) => {
+    const btn = (e.target as HTMLElement).closest("[data-action]");
+    if (!btn) return;
+    const action = btn.getAttribute("data-action");
+    const id = btn.getAttribute("data-id");
+    if (!id) return;
+    if (action === "open") void openSaved(id);
+    else if (action === "rename") void renameSaved(id);
+    else if (action === "delete") void deleteSaved(id);
+  });
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !libraryModalEl.classList.contains("hidden")) closeLibrary();
+  });
 }
 
 // Chip controls are wired once; they act on whatever the current `player` is.

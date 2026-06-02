@@ -441,6 +441,129 @@
         display: none !important;
       }
 
+      /* Phase 5 #4 — saved-graph library modal. A centered panel over a dimming
+         backdrop; rows list each saved graph with open / rename / delete. */
+      #library-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 30;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #library-modal .lib-backdrop {
+        position: absolute;
+        inset: 0;
+        background: rgba(5, 7, 13, 0.66);
+        backdrop-filter: blur(3px);
+        -webkit-backdrop-filter: blur(3px);
+      }
+      #library-modal .lib-panel {
+        position: relative;
+        width: min(560px, calc(100vw - 48px));
+        max-height: min(72vh, 720px);
+        display: flex;
+        flex-direction: column;
+        background: rgba(11, 16, 28, 0.98);
+        border: 1px solid #26334d;
+        border-radius: 12px;
+        box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+        color: #cfe3ff;
+        overflow: hidden;
+      }
+      #library-modal .lib-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 16px;
+        border-bottom: 1px solid #1d2740;
+      }
+      #library-modal .lib-title {
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: #eaf2ff;
+      }
+      #library-close {
+        font: inherit;
+        font-size: 20px;
+        line-height: 1;
+        color: #9bb0d6;
+        background: transparent;
+        border: none;
+        cursor: pointer;
+        padding: 0 4px;
+      }
+      #library-close:hover {
+        color: #eaf2ff;
+      }
+      #library-list {
+        overflow-y: auto;
+        padding: 8px;
+      }
+      #library-list .lib-empty {
+        opacity: 0.55;
+        font-style: italic;
+        padding: 24px 12px;
+        text-align: center;
+      }
+      #library-list .lib-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 10px;
+        border-radius: 8px;
+        border: 1px solid transparent;
+      }
+      #library-list .lib-row:hover {
+        background: rgba(122, 162, 255, 0.07);
+        border-color: #26334d;
+      }
+      #library-list .lib-row-main {
+        flex: 1;
+        min-width: 0;
+        cursor: pointer;
+      }
+      #library-list .lib-name {
+        font-size: 14px;
+        font-weight: 600;
+        color: #eaf2ff;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #library-list .lib-sub {
+        font-size: 11.5px;
+        color: #9bb0d6;
+        margin-top: 2px;
+        font-variant-numeric: tabular-nums;
+        text-transform: capitalize;
+      }
+      #library-list .lib-actions {
+        display: flex;
+        gap: 6px;
+        flex: none;
+      }
+      #library-list .lib-btn {
+        font: inherit;
+        font-size: 12px;
+        color: #cfe3ff;
+        background: rgba(13, 20, 38, 0.85);
+        border: 1px solid #33415c;
+        border-radius: 6px;
+        padding: 5px 10px;
+        cursor: pointer;
+      }
+      #library-list .lib-btn:hover {
+        border-color: #7aa2ff;
+        background: rgba(26, 38, 64, 0.9);
+      }
+      #library-list .lib-btn.lib-danger:hover {
+        border-color: #ff6b6b;
+        color: #ffd9d9;
+      }
+
       /* Right sidebar (D3): the document text unfolds here, sentence by sentence,
          as the matching nodes are assimilated into the graph. The 3D canvas is
          narrowed to leave room for it (see layoutGraph in main.ts). */
@@ -696,6 +819,8 @@
         spellcheck="false"
       />
       <span id="meaning-count" class="hidden"></span>
+      <button id="save-doc" type="button" class="hidden" title="Save this graph to the library">Save</button>
+      <button id="library" type="button" class="hidden" title="Open the saved-graph library">Library</button>
       <button id="open-doc" type="button">Open document</button>
       <button id="reset" type="button">Reset view</button>
     </div>
@@ -721,6 +846,20 @@
       />
     </div>
     <div id="drop-hint"><div class="box">Drop a .txt, .md, or .pdf document to visualize</div></div>
+    <!-- Phase 5 #4 (ADR-0007): the saved-graph library. Desktop-only (revealed
+         when running in the Tauri shell); lists persisted graphs with open /
+         rename / delete. Opening one restores the exact saved layout instantly,
+         with no re-walk. -->
+    <div id="library-modal" class="hidden">
+      <div class="lib-backdrop" id="library-backdrop"></div>
+      <div class="lib-panel" role="dialog" aria-label="Saved graphs">
+        <div class="lib-header">
+          <span class="lib-title">Saved graphs</span>
+          <button id="library-close" type="button" title="Close (Esc)" aria-label="Close">×</button>
+        </div>
+        <div id="library-list" class="lib-list"></div>
+      </div>
+    </div>
     <aside id="sidebar">
       <div id="sidebar-header">
         <span id="sidebar-title">Document</span>
