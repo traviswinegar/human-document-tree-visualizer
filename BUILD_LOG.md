@@ -85,9 +85,12 @@ Cargo **workspace** at repo root:
 | B3 | 5 | LLM semantic layer: grammar-constrained extraction merged onto spine | fixture fiction → characters/events/edges; schema-valid |
 | B4 | 5 | Embeddings → similarity edges + search (vectordb, gated separately) | similarity edges added; search works |
 | B5 | 6 | Document-type detection runtime gate (classify → route to narrative) | classifies narrative vs not on fixtures; routes |
+| C1 | 4 ✓ | Browser walker via WASM (public web build) + runtime document upload (Open button / drag-drop) + floating-chip build progress | public web build walks via WASM with the *same* engine as desktop; user swaps the document at runtime → fresh streamed build |
 
 Interleave: kick the long CUDA compile (B1) in the background early; do Stream A
-while it compiles.
+while it compiles. **Stream C** (public-web/WASM + upload UX) was added mid-run
+on user direction ("host it for the public … should work in Desktop as well");
+C1 is complete.
 
 ---
 
@@ -104,6 +107,14 @@ feature that runs CPU inference and round-trips text, then verify the GBNF
 grammar actually compiles (watch the ~5-alternative ceiling on `nodekind`/
 `edgekind`, flagged at A3). CPU is the working path; GPU is still blocked
 (Catch-all). Model at `DOCTREE_MODEL_PATH` (qwen3-4b-q4km.gguf).
+
+> **Stream C (C1) landed since this position was set.** The public web build now
+> walks documents in-browser via WASM (`doctree-core` → wasm32, same engine as
+> the desktop walker) and the user can replace the document at runtime (Open
+> button / drag-drop) — each new doc tears down the running build and streams a
+> fresh one, with playback collapsed into a faint floating chip so it never
+> competes with the animation. Verified live (see C1 entry below). B2 remains the
+> next *build-order* step, but the user is now interactively testing C1.
 
 > **User direction (2026-06-02, to discuss in the morning):** build the *full*
 > pipeline for **both** the LLM path **and** the deterministic "Tier 1" path so
@@ -143,6 +154,13 @@ grammar actually compiles (watch the ~5-alternative ceiling on `nodekind`/
   - **(2/3)** Tauri app crate + bridge. Commit `0f6db4f` · tests `src-tauri/src/lib.rs::tests::*` (7, incl. `walk_params_*`, `walk_document_is_deterministic`, `build_steps_account_for_exactly_the_graph`, `build_steps_serialize_to_frontend_tagged_shape`) (`cargo test -p doctree-tauri`) · src `src-tauri/src/lib.rs` (`walk_document_impl`/`build_steps_impl` + `#[tauri::command]` `walk_document`/`build_steps`, `WalkParams`→`WalkOptions`, `run()`), `src-tauri/src/main.rs` (launcher), `src-tauri/tauri.conf.json` (id `games.milsoft.doctree`, frontendDist `../dist`), `src-tauri/capabilities/default.json` (`core:default`), `src/doc-source.ts` (Tauri live-walk vs browser-fixture fallback), `src/main.ts` (async `initBuild`).
   - Verified: `cargo check -p doctree-tauri` clean (34 s, MSVC 14.50 — the Tauri dep tree builds fine; the toolchain failures are CUDA/Vulkan-specific, not general MSVC); full workspace **48 tests green with ZERO native deps** (core 34 + integration 2 + llm 5 + tauri 7); `npm run build` (tsc + vite) clean, `dist/` emitted for `generate_context!`; browser fixture fallback renders + animates live via dev handles (`__doctreeSource.origin === "fixture"`, 13 nodes/18 edges/31 steps, build grew to 13/31, `isTauri === false`).
   - Note: the **live desktop window** (Tauri shell calling the real Rust walker over IPC) **cannot be launched/screenshotted in this headless environment** — that round-trip is the user's end test (`npm run tauri dev`). Everything else (compile, Rust unit tests, browser-fallback render) is verified above. GPU still CPU-only (see Catch-all).
+- **C1** — public-web browser walker via WASM + runtime document upload + floating-chip progress. Added mid-run on user direction: "Definitely want this to work in a browser so I can host it for the public … should work in Desktop as well."
+  - **toolchain** — `rustup target add wasm32-unknown-unknown` + `cargo install wasm-pack` (0.15.0); `wasm-opt = false` in the crate's wasm-pack profile so the build is self-contained (no binaryen download). Environment change, no committed files.
+  - **wasm crate + ADR-0003.** Commit `c6b80d4` · tests `crates/doctree-wasm/src/lib.rs::tests::*` (6, incl. `build_steps_json_matches_core_sequence`, `build_steps_json_is_frontend_tagged_shape`, `walk_document_json_is_valid_graph_shape`) (`cargo test -p doctree-wasm`) · src `crates/doctree-wasm/src/lib.rs` (`#[wasm_bindgen] buildSteps`/`walkDocument`/`start`, returns the *same tagged JSON string* the Tauri command produces), ADR `docs/adr/ADR-0003-doctree-core-to-wasm-browser-walker.md`, workspace member in `Cargo.toml`.
+  - **frontend WASM bridge.** Commit `6f15aa7` · src `src/doc-source.ts` (`loadBuildSource` engine pick: `tauri-walk` → `wasm-walk` → `fixture`; lazy one-time `getWasm()` dynamic import keeps the ~180 KB glue out of the initial bundle), `package.json` (`build:wasm` + `pre(dev|build)` hooks), `.gitignore` (`src/wasm/` generated output).
+  - **upload UI + chip.** Commit `0ba7000` · src `src/main.ts` (rebuildable `startBuild`/`loadAndBuild`/`ingestFile`; Open-button → hidden file input; window-wide drag-drop with depth-counted hint; chip wires `playpause`/`replay` once against a re-pointed module `player`; progress bar fill + icon swap), `index.html` (`#open-doc`, hidden `#file-input`, `#playback` floating chip with `#build-bar`, `#drop-hint` overlay).
+  - Verified: `npx tsc --noEmit` clean; `npm run build` clean (wasm rebuilt, tsc, vite — wasm code-split into its own 183 KB chunk, `dist/` emitted). Runtime confirmed live via preview dev handles (`__doctreeSource`): initial load walks via **WASM** (`origin "wasm-walk"`, 54 nodes/145 edges/199 steps, build streams in); a **dropped document** re-ingests (`wasm-walk`, 8/12/20, distinct counts) — old build torn down, fresh one streamed; build completes → bar 100 %, progress "ready", play/pause shows the replay glyph (⟳); the chip's **replay** click resets to 0/20 and regrows. Zero console warnings/errors.
+  - Note: `preview_screenshot` again times out against the continuously-animating WebGL canvas (the documented rAF-loop tooling limitation) — render verified by dev-handle introspection instead, as with A5–A8.
 
 ---
 
