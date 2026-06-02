@@ -55,13 +55,23 @@ export interface BuildPlayer {
 
 export interface BuildPlayerOptions {
   sequence: BuildEvent[];
+  // Target pace: milliseconds *per step*. This is a rate, not a timer period —
+  // the player ticks at a fixed frame cadence and reveals however many steps are
+  // due by elapsed wall-clock, so small values fold many steps into one frame.
   intervalMs: number;
   // Push the current revealed subgraph into the view. Fresh arrays each call;
   // element refs are stable so already-placed nodes keep their positions and
-  // only the newcomer animates in.
+  // only the newcomers animate in.
   apply: (nodes: GraphNode[], edges: GraphEdge[]) => void;
   onProgress?: (step: number, total: number, done: boolean) => void;
 }
+
+// The timer fires at roughly one animation frame; each fire reveals all steps
+// that have come *due* since the pacing anchor. Throughput is therefore bounded
+// by one graphData() apply per frame, not by the per-step render cost — so the
+// fast end of the speed range can fold dozens of steps into a single repaint and
+// approach an instant build, while the slow end still drips one step at a time.
+const FRAME_MS = 16;
 
 export function createBuildPlayer(opts: BuildPlayerOptions): BuildPlayer {
   const { sequence, apply, onProgress } = opts;
@@ -71,6 +81,11 @@ export function createBuildPlayer(opts: BuildPlayerOptions): BuildPlayer {
   const edges: GraphEdge[] = [];
   let step = 0;
   let timer: number | null = null;
+  // Pacing anchor: steps due = anchorStep + floor((now - anchorTime) / intervalMs).
+  // Re-anchored on play()/setSpeed() so a pace change starts from "now" and never
+  // retroactively jumps (or rewinds) the build.
+  let anchorTime = 0;
+  let anchorStep = 0;
 
   const report = () =>
     onProgress?.(step, sequence.length, step >= sequence.length);
@@ -83,23 +98,30 @@ export function createBuildPlayer(opts: BuildPlayerOptions): BuildPlayer {
   }
 
   function tick(): void {
-    if (step >= sequence.length) {
-      stop();
-      return;
+    const elapsed = performance.now() - anchorTime;
+    const due = anchorStep + Math.floor(elapsed / intervalMs);
+    const target = Math.min(due, sequence.length);
+    if (target > step) {
+      // Drain every due step into the working arrays, then apply once. Batching
+      // the graphData() call is the whole point — N steps, one repaint.
+      for (; step < target; step++) {
+        const ev = sequence[step];
+        if (ev.kind === "node") nodes.push(ev.node);
+        else edges.push(ev.edge);
+      }
+      apply([...nodes], [...edges]);
     }
-    const ev = sequence[step++];
-    if (ev.kind === "node") nodes.push(ev.node);
-    else edges.push(ev.edge);
-    apply([...nodes], [...edges]);
-    // Stop before reporting on the final step so onProgress sees isPlaying()
-    // false / done true (otherwise the last tick reports mid-play state).
+    // Stop before the final report so onProgress sees isPlaying() false / done
+    // true (otherwise the completing tick would report a mid-play state).
     if (step >= sequence.length) stop();
     report();
   }
 
   function play(): void {
     if (timer !== null || step >= sequence.length) return;
-    timer = window.setInterval(tick, intervalMs);
+    anchorTime = performance.now();
+    anchorStep = step;
+    timer = window.setInterval(tick, FRAME_MS);
   }
 
   function pause(): void {
@@ -116,14 +138,12 @@ export function createBuildPlayer(opts: BuildPlayerOptions): BuildPlayer {
     report();
   }
 
-  // Change the per-step cadence. If a build is running, restart the timer so the
-  // new speed applies right away rather than only on the next play().
+  // Change the per-step pace. Re-anchor to the current step/time so the new rate
+  // takes effect immediately and smoothly, with no retroactive jump.
   function setSpeed(ms: number): void {
     intervalMs = ms;
-    if (timer !== null) {
-      window.clearInterval(timer);
-      timer = window.setInterval(tick, intervalMs);
-    }
+    anchorTime = performance.now();
+    anchorStep = step;
   }
 
   return {

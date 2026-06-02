@@ -156,11 +156,13 @@ const ICON_REPLAY = "⟳";
 // chip controls below read it through this binding (null until the first build).
 let player: BuildPlayer | null = null;
 
-// Build-animation pacing. The walk itself is instant — this only throttles the
-// on-screen reveal. The slider spans MAX (the original deliberate pace) down to
-// MIN (as fast as the per-step graphData() reheat stays visually coherent; below
-// this the render loop, not the timer, is the floor). Persisted across rebuilds.
-const MIN_INTERVAL_MS = 12;
+// Build-animation pacing (ms per step). The walk itself is instant — this only
+// throttles the on-screen reveal. The player batches by elapsed time (one
+// graphData() apply per frame), so the fast end is no longer pinned to the
+// per-step render cost: MIN packs ~30 steps into each frame, completing the
+// whole build in a handful of frames (≈ instant). MAX is the original deliberate
+// drip. Persisted across rebuilds.
+const MIN_INTERVAL_MS = 0.5;
 const MAX_INTERVAL_MS = 220;
 let currentIntervalMs = MAX_INTERVAL_MS;
 
@@ -188,6 +190,11 @@ function startBuild(source: BuildSource): void {
   graph.graphData({ nodes: [], links: [] });
   statsEl.textContent = `${source.nodeCount} nodes · ${source.edgeCount} edges (${source.origin})`;
 
+  // onProgress now fires ~every frame, and steps arrive in batches, so the old
+  // `step % 4` cadence for re-framing is meaningless. Throttle zoomToFit by
+  // wall-clock instead — refit at most ~4×/s during the build (it's expensive,
+  // and at high speed firing it every frame would erase the batching win).
+  let lastFitAt = 0;
   const p = createBuildPlayer({
     sequence: source.sequence,
     intervalMs: currentIntervalMs,
@@ -203,8 +210,14 @@ function startBuild(source: BuildSource): void {
       playPauseEl.textContent = p.isPlaying() ? ICON_PAUSE : done ? ICON_REPLAY : ICON_PLAY;
       buildProgressEl.textContent = done ? "ready" : `${step}/${total}`;
       // Keep the growing graph framed while the build runs; settle on completion.
-      if (done) graph.zoomToFit(800, 80);
-      else if (step % 4 === 0) graph.zoomToFit(500, 80);
+      const now = performance.now();
+      if (done) {
+        graph.zoomToFit(800, 80);
+        lastFitAt = now;
+      } else if (now - lastFitAt > 250) {
+        graph.zoomToFit(500, 80);
+        lastFitAt = now;
+      }
     },
   });
   player = p;
