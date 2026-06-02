@@ -106,31 +106,44 @@ native-free).
 
 ## Current Position
 
-**B5 — document-type detection runtime gate (classify narrative vs not → route).**
+**#20 — dual-pipeline benchmarking (LLM vs deterministic Tier-1), per-stage.**
 Stream A is **complete** end to end (doc → walker → ordered build steps →
-animated, interactive, replayable 3D graph; A1–A8). The semantic B-stream now has
-two layers landed on top of the spine: **B3** (LLM grammar-constrained extraction
-merged onto the spine, `semantic_build_steps`) and **B4** (embedding similarity).
+animated, interactive, replayable 3D graph; A1–A8). The semantic **B-stream
+backend is now complete (B1–B5)**: B3 (LLM grammar-constrained extraction merged
+onto the spine, `semantic_build_steps`), B4 (embedding similarity +
+`semantic_search`), and B5 (document-type detection runtime gate).
 
-**B4 just landed:** two gated Tauri commands behind the `vectordb` feature —
-`embedded_build_steps` walks the spine, embeds its content nodes (all-MiniLM-L6-v2
-via fastembed/ONNX), derives weighted `SimilarTo` edges between near neighbours
-(top-k per node above a cosine threshold) and returns the augmented `BuildStep`
-stream; `semantic_search` embeds a free-text query and ranks the nodes by cosine.
-Per **ADR-0004**, similarity is computed **in-memory** (no LanceDB at this
-single-document scale — deferred to a future corpus/RAG milestone) and `vectordb`
-is **decoupled from `llm`** (embeddings build with no C++ toolchain — fastembed
-downloads a prebuilt ONNX runtime). All the similarity math (cosine, top-k, edge
-derivation, ranking) is pure native-free code in `doctree-llm`, tested by the
-default suite; only the embedder model is gated.
+**B5 just landed:** a deterministic, native-free document classifier in
+`doctree-core` (`classify_document` → `{class, confidence, signals}`) over four
+surface signals — word-weighted heading/list/code structure, dialogue, first/
+third-person pronoun density, past-tense density — that separates `Narrative` /
+`Expository` / `Structured` / `Unknown` and recommends a pipeline
+(`NarrativeHybrid` / `StructuralPlusSimilarity` / `StructuralOnly`). The Tauri
+layer adds `Capabilities`/`resolve_pipeline`/`Routing` and an always-registered
+`classify_document` command that **reconciles** that recommendation with the
+features the build actually compiled (`llm`, `vectordb`) and names the concrete
+command to call — degrading gracefully (hybrid → similarity → spine) and flagging
+the downgrade. Per **ADR-0005** the gate consults **no model** (surface features
+separate the corpus; an LLM confirmation for low-confidence cases is deferred),
+so unlike B2/B3/B4 the whole layer is verified headlessly with no `#[ignore]`d
+live test. The split mirrors ADR-0004: the class→ideal mapping is pure core
+logic; the capability reconciliation lives with the commands (only they know what
+was compiled).
 
-B5 is the next *build-order* step: classify an incoming document (narrative
-fiction vs. other) at runtime and **route** the pipeline accordingly — Phase 1's
-ontology (ADR-0002) is narrative-specific, so a non-narrative document should
-take a different (or degraded) path rather than be force-fit. Likely a cheap
-deterministic classifier (structural/lexical signals) with an optional LLM
-confirmation when that layer is present. Pure classification logic is unit-
-testable headlessly; the routing wires into the command layer.
+**#20 is the next *build-order* step:** run a document through *both* extraction
+strategies — the deterministic "Tier-1" spine and the gated LLM path — and
+benchmark them at every stage (segmentation, entity/relationship extraction,
+final graph quality, latency), not just at the end. Raised by the user 2026-06-02
+(see Catch-all backlog). It needs the gated LLM path, which B1–B3 now provide;
+shape is a benchmark harness over shared fixtures emitting a per-stage comparison.
+
+> **Deferred frontend wiring (B3/B4/B5).** The semantic + classification backends
+> are complete and unit-tested, but the **frontend still calls the structural
+> build** path. One integration pass (after the B-stream + benchmarking settle)
+> should: classify on load via `classify_document`, dispatch to the resolved
+> build command, add a "find by meaning" search box (`semantic_search`), and
+> surface the document class / any capability downgrade in the UI. Flagged
+> desktop-only-untested (the Tauri window can't launch headlessly).
 
 > **Stream C (C1) landed since this position was set.** The public web build now
 > walks documents in-browser via WASM (`doctree-core` → wasm32, same engine as
@@ -218,6 +231,10 @@ testable headlessly; the routing wires into the command layer.
   Commit `58aeae6` · tests `crates/doctree-llm/src/lib.rs::tests::{cosine_similarity_handles_identical_orthogonal_and_degenerate, rank_by_similarity_orders_best_first_and_truncates, similarity_edges_link_only_pairs_above_threshold, similarity_edges_respect_top_k, graph_embedding_inputs_selects_content_nodes, embed_cache_dir_prefers_the_env_var}` + `src-tauri/src/llm.rs::tests::{attach_similarity_edges_appends_valid_weighted_links, to_search_hits_attaches_label_and_kind_and_serializes_camel_case}` (all default native-free) + ignored live `src-tauri/tests/embedding_roundtrip.rs::{embedder_returns_a_384d_vector, related_text_is_closer_than_unrelated_text, similarity_edges_augment_the_spine}` · src `crates/doctree-llm/src/lib.rs` (`cosine_similarity`, `SimilarityOptions`, `similarity_edges`, `rank_by_similarity`, `SearchHit`, `is_embeddable_kind`, `graph_embedding_inputs`, `embed_cache_dir`, `EMBED_CACHE_ENV`; gated `Embedder` over momusdev's `FastEmbedder`), `src-tauri/src/llm.rs` (pure `attach_similarity_edges`, `SearchHitDto`, `to_search_hits`; gated `ensure_embedder_loaded`/`embed_batch_blocking`/async `embedded_build_steps`+`semantic_search`; native-free stubs + `no_vectordb_error`), `src-tauri/src/lib.rs` (two-slot `LlmState` gated `any(llm,vectordb)`; `generate_handler!` + `embedded_build_steps`/`semantic_search`), `crates/doctree-llm/Cargo.toml` + `src-tauri/Cargo.toml` (`vectordb` feature decoupled from `llm`), ADR `docs/adr/ADR-0004-embedding-similarity-layer.md`.
   Verified: default `cargo test --workspace` **72 green, native-free** (core 36 + integration 2 + llm 13 + tauri 15 + wasm 6; `cargo tree -p doctree-tauri` shows no `momusdev`/`llama`/`lancedb`/`fastembed`/`arrow`); `--features llm` still compiles clean under MSVC after the `LlmState` two-slot refactor (regression check); gated `cargo test --no-run -p doctree-tauri --features vectordb` compiles clean under MSVC in ~2m44s (my crates warning-free; only 2 upstream `momusdev_llm` warnings) and builds the ignored `embedding_roundtrip` binary — and notably did **not** compile llama.cpp, proving the decoupling (the embedder builds with no C++ toolchain). Per ADR-0004 similarity is in-memory cosine (no LanceDB at single-document scale) and `vectordb` is independent of `llm` (embeddings build with no C++ toolchain — fastembed downloads a prebuilt ONNX runtime).
   Note: the **live embedding round-trip** (ONNX model load → real 384-d vectors → similarity edges) is the user's desktop end test — the model can't load in this headless env. Run with `cargo test -p doctree-tauri --features vectordb -- --ignored --nocapture` (optionally `set DOCTREE_EMBED_CACHE=…` to a pre-populated cache for offline use). The pure similarity math (cosine/top-k/ranking/edge derivation) is unit-tested headlessly.
+- **B5** — document-type detection runtime gate (deterministic classifier + capability-aware routing) + ADR-0005.
+  Commit `d95e1be` · tests `crates/doctree-core/src/classify.rs::tests::{classify_is_deterministic, narrative_prose_classifies_as_narrative, technical_prose_classifies_as_expository, heading_list_code_doc_classifies_as_structured, tiny_or_empty_doc_is_unknown, a_single_heading_does_not_make_prose_structured, signals_are_bounded_and_confidence_in_unit_range, dialogue_and_pronouns_are_measured}` (8) + `src-tauri/src/lib.rs::tests::{narrative_routing_degrades_with_capabilities, expository_routing_needs_only_the_embedder, structural_only_always_resolves_to_the_spine, resolved_commands_are_actually_registered, classify_routes_narrative_and_flags_downgrade_on_a_lean_build, classify_document_serializes_camel_case_with_snake_case_tags}` (6) — all default native-free, **no `#[ignore]`d live test** (the gate consults no model) · src `crates/doctree-core/src/classify.rs` (`classify_document`, `Classification`, `ClassificationSignals`, `DocumentClass`, `RecommendedPipeline`; word-weighted structure + dialogue + pronoun + past-tense signals → decision tree), `crates/doctree-core/src/lib.rs` (re-exports), `src-tauri/src/lib.rs` (`Capabilities`/`Capabilities::compiled`, `ResolvedPipeline`/`command`, pure `resolve_pipeline`, `Routing`, `classify_document_impl` + `classify_document` command + `generate_handler!` registration), ADR `docs/adr/ADR-0005-document-type-detection-runtime-gate.md`.
+  Verified: default `cargo test --workspace` **86 green, native-free** (core 44 + integration 2 + llm 13 + tauri 21 + wasm 6; `cargo tree -p doctree-tauri` shows no `momusdev`/`llama`/`lancedb`/`fastembed`/`arrow`); both gated builds regression-clean under MSVC — `cargo check -p doctree-tauri --features llm` (2.95 s incremental) and `--features vectordb` (1m06s) compile with my crates warning-free (only pre-existing upstream `momusdev_llm` warnings). Per ADR-0005 the classifier is deterministic + native-free (so it's fully headlessly verified, unlike B2/B3/B4): the class→ideal-pipeline mapping is pure `doctree-core` logic; the capability reconciliation (`cfg!(feature=…)` → which registered command can actually run) lives in the command layer, degrading gracefully (hybrid → similarity → spine) and flagging the downgrade.
+  Note: the gate adds one always-registered IPC command (`classify_document`) returning the verdict + the command to call; **wiring the frontend to call it** (classify on load → dispatch to the resolved build command → surface class/downgrade) is the deferred B3/B4/B5 frontend-integration pass. An optional LLM *confirmation* for low-confidence classifications is deferred (ADR-0005) — the surface features separate the fixtures cleanly without a model.
 
 ---
 
