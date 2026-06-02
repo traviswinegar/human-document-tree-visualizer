@@ -287,16 +287,20 @@ autonomously):**
   Commit `8ca3bf2` · test `npx tsc --noEmit` (exit 0) + `npm run build` (exit 0, 397 modules) + **live desktop HMR verification**: saving both modules triggered vite `page reload src/colors.ts` / `src/main.ts` and the webview re-reached `loadAndBuild` with no module-init throw — proving the new `graph.d3Force(...)` force-tuning and the bloom passes construct cleanly on the live webview (a throw in module init would precede `loadAndBuild`) · src `src/colors.ts` (`NODE_COLORS` → robust, fully-saturated Tailwind-500/600 jewel tones, same cool=structural / warm=semantic split but no longer leaning on glow), `src/main.ts` (bloom `BLOOM_STRENGTH` 0.4→0.18, `BLOOM_RADIUS` 0.3→0.2, `BLOOM_THRESHOLD` 0.2→0.35; new force block — `graph.d3Force("charge").strength(-90).distanceMax(600)` + `d3Force("link").distance(40)`, named `CHARGE_STRENGTH`/`CHARGE_MAX_DISTANCE`/`LINK_DISTANCE` tunables).
   Root cause (three complaints, three fixes): (1) the pastel/luminous palette washed out under bloom — swapped for saturated jewel tones that carry on their own; (2) on a 1097-node graph the glow of hundreds of overlapping spheres *accumulates* into a hazy centre — cut bloom on all three axes so only the brightest cores rim-glow; (3) d3's default charge (−30) lets the spine's long `precedes` chain coil into one ball at rest, erasing the snake/loop filaments that form during the build — stronger repulsion (−90, range-capped at 600 so it opens without exploding) + longer links (40) make the *equilibrium itself* open, so the shape that grows is the shape that stays.
   Note: glow intensity + layout spread are the user's perceptual call (the desktop webview isn't screenshot-introspectable; `preview_screenshot` also times out on the animating canvas) — `BLOOM_*` and `CHARGE_STRENGTH`/`LINK_DISTANCE` are named knobs at the top of each block in `main.ts`. Frontend-only; default build stays native-free.
+- **#37** — fix the 0-byte grammar-constrained extraction (the semantic overlay had never rendered). _No ADR — a defect fix that restores the already-decided B3 behaviour (grammar from ADR-0002, prompt from B3); no new load-bearing choice. The fix mirrors `momusdev_llm`'s proven `extract_command` ChatML pattern rather than introducing a competing one._ Promoted from the Catch-all HIGH item to the active task by the user's screenshot of the stuck "walking…" window.
+  Commit `ac0a93c` · tests: behavioral `crates/doctree-llm/src/lib.rs::tests::extraction_prompt_is_chatml_with_open_assistant_turn` (system→user→**open assistant** turn ordering; instructions in system, document in user) + the failing-test-that-demonstrates-the-bug `…::tests::live_extraction_yields_nonempty_schema_valid_graph` (`#[ignore]`, `#[cfg(feature = "llm")]`) · src `crates/doctree-core/src/grammar.rs` (`GRAPH_GBNF` made whitespace-free — `root ::= graph`, every `ws` removed, the `ws ::=` rule deleted), `crates/doctree-llm/src/lib.rs` (`build_extraction_prompt` now emits a ChatML envelope: `<|im_start|>system\n{instructions}\n<|im_end|>\n<|im_start|>user\n…{anchored doc}…<|im_end|>\n<|im_start|>assistant\n`), `crates/doctree-llm/Cargo.toml` (test-only `serde_json` dev-dep), `scripts/test-llm-live.cmd` (reusable vcvars64 + `DOCTREE_MODEL_PATH` runner for the ignored live tests).
+  Root cause (two compounding faults): (1) the grammar threaded an optional `ws` rule through every position including a leading `root ::= ws graph ws` (`ws ::= ([ \t\n] ws)?`) — under greedy sampling the model satisfied the grammar by emitting newlines *indefinitely* before committing to `{`, so it filled the 2048-token budget with whitespace that `strip_chatml_tokens` `.trim()`med to `""`; (2) `build_extraction_prompt` produced a raw instruction string with no chat framing, so nothing primed the model to begin its answer. The fix attacks both: forbidding whitespace masks those tokens out of the sampler (the only legal first token is `{` — the stall is structurally impossible), and the open assistant turn primes immediate JSON.
+  Verified: default `cargo test -p doctree-core -p doctree-llm` 51 + 14 green, **native-free** (the new behavioral test included; the live test is gated + ignored so it never runs by default; `serde_json` is a pure-Rust dev-dep, no native pull). The gated `--features llm,vectordb` build recompiled clean in the running `tauri dev` and relaunched. **Live end-to-end against the real qwen3-4b** (via `scripts/test-llm-live.cmd`): `[LLM gbnf] prompt_tokens=294, completion_tokens=160, inference_ms=28138, output_bytes=548/16384` → **548 bytes (was 0), 160 tokens (was the 2048 runaway cap), ~28 s (was ~240 s)**, deserialized into a schema-valid `Graph` with ≥1 entity. **User-confirmed visually**: opening a narrative doc on the desktop now renders the warm character/place/object nodes ("The Keeper of Harbor's End": Mara, Vane, the Cormorant) over the cool structural spine, routing line "Narrative · 92% · hybrid (LLM)" — the semantic overlay that had never appeared before.
 
 ---
 
 ## Catch-all backlog (off-topic discoveries — provenance noted, never fixed inline)
 
-- **🔴 HIGH — Grammar-constrained extraction yields 0 output bytes (the semantic
-  overlay has never actually rendered).** _(discovered while doing #35's
-  look-and-feel pass, watching the live desktop dev log.)_ With the desktop app
-  running, the #29 auto-classify chain fired `semantic_build_steps` against the
-  real qwen3-4b, and the engine logged:
+- **✅ DONE (#37, commit `ac0a93c`) — Grammar-constrained extraction yielded 0
+  output bytes (the semantic overlay had never actually rendered).** _(discovered
+  while doing #35's look-and-feel pass, watching the live desktop dev log.)_ With
+  the desktop app running, the #29 auto-classify chain fired `semantic_build_steps`
+  against the real qwen3-4b, and the engine logged:
   `[LLM gbnf] threads=8, gpu_layers=999, prompt_tokens=610, completion_tokens=2048,
   inference_ms=240504, tok/s=8.5, output_bytes=0/16384`. So grammar-constrained
   decoding ran **~4 minutes**, generated the full **2048-token cap**, but produced
@@ -304,33 +308,19 @@ autonomously):**
   `LLM output was not schema JSON: EOF while parsing a value at line 1 column 0` →
   the frontend silently fell back to the structural `build_steps`. Net effect: the
   headline desktop feature (LLM character/place/concept/event nodes) **never
-  renders** — every prior B2/B3/#20 "live model load is the user's end test" note
-  masked this because the round-trip had never actually been run until now.
-  - **Candidate root causes (in priority order):**
-    1. **Qwen3 thinking-mode vs. the GBNF.** This is `Qwen3 4B Instruct` whose chat
-       template emits a `<think>…</think>` reasoning block. If the prompt is sent
-       through the chat template and the grammar is applied from token 0, the model
-       may be wedged emitting reasoning/special tokens that the output collector
-       drops (→ 0 *answer* bytes) until it hits the 2048 cap. Check whether
-       `doctree-llm`'s prompt builder disables thinking (e.g. `/no_think` or the
-       template's `enable_thinking=false`) and whether grammar is applied to the
-       answer span only.
-    2. **GBNF too permissive at the root** (allows unbounded leading
-       whitespace/newlines) so the model degenerates into emitting only
-       whitespace-class tokens that the collector trims to empty. Inspect the
-       A3 grammar (`crates/doctree-core` / `doctree-llm` GBNF for `{nodes,edges}`).
-    3. **Output-collection / detokenization in `momusdev_llm::complete_with_grammar`**
-       (the `output_bytes=0` counter lives in that crate's `[LLM gbnf]` log line).
-       ⚠️ `momusdev_llm` is a **read-only shared crate** — if the bug is here, it's
-       the **user's** fix, not mine; flag it, don't patch it.
-  - **First diagnostic step (cheap, no 4-min wait):** run the `#[ignore]`d B2
-    round-trip with `--nocapture` and a tiny grammar/prompt to see if *freeform*
-    completion returns bytes while *grammar* returns 0 — that isolates (1)/(2)
-    from (3). `set DOCTREE_MODEL_PATH=…\qwen3-4b-q4km.gguf` then
-    `cargo test -p doctree-tauri --features llm -- --ignored --nocapture`.
-  - **Not fixed inline** (off-topic to the color/bloom/layout request); surfaced to
-    the user and captured here + as a spawned task. The structural spine + the
-    whole frontend are unaffected — this is purely the semantic-overlay round-trip.
+  rendered** — every prior B2/B3/#20 "live model load is the user's end test" note
+  masked this because the round-trip had never actually been run until then.
+  - **Resolution (candidate #2 + a prompt-framing fault, *not* in `momusdev_llm`):**
+    the real cause was the grammar's leading `root ::= ws graph ws` (with
+    `ws ::= ([ \t\n] ws)?`) letting the model emit newlines until the budget ran out,
+    compounded by `build_extraction_prompt` sending a raw, un-framed instruction
+    string. Fixed in #37 by making `GRAPH_GBNF` whitespace-free (so the only legal
+    first token is `{`) and wrapping the prompt in ChatML with an open assistant
+    turn (mirroring `momusdev_llm`'s `extract_command`). Candidate #1 (Qwen3 thinking
+    mode) and #3 (a detokenization bug in the read-only crate) were *not* the cause —
+    `momusdev_llm` was not touched. Verified live: **output_bytes 0→548,
+    completion_tokens 2048→160, ~240 s→~28 s**, schema-valid `Graph`; user-confirmed
+    the semantic nodes now render. See the #37 entry above for the full triple.
 
 - **🟡 LOW / likely-harmless dev-mode noise (don't chase without a repro).**
   _(observed in the same desktop dev log.)_ Two warnings appear during `tauri dev`
