@@ -2504,6 +2504,7 @@ name = "doctree-tauri"
 version = "0.1.0"
 dependencies = [
  "doctree-core",
+ "doctree-llm",
  "serde",
  "serde_json",
  "tauri",

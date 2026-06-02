@@ -17,6 +17,10 @@
 use doctree_core::{build_sequence, walk_with, BuildStep, Graph, WalkOptions};
 use serde::{Deserialize, Serialize};
 
+/// The gated local-LLM command layer (B2). Always present in the source; the
+/// native engine inside it is compiled only under the `llm` feature.
+mod llm;
+
 /// Frontend-supplied walk tunables. Mirrors [`WalkOptions`]; every field is
 /// optional so the frontend can send `{}` (or omit the argument) and get the
 /// conservative defaults. Kept as its own type rather than reusing
@@ -69,8 +73,20 @@ fn build_steps(text: String, params: Option<WalkParams>) -> Vec<BuildStep> {
 /// entry point Tauri generates).
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![walk_document, build_steps])
+    let builder = tauri::Builder::default();
+    // The lazily-loaded inference engine only exists (and only needs managing)
+    // under the `llm` feature; the default build manages nothing native.
+    #[cfg(feature = "llm")]
+    let builder = builder.manage(llm::LlmState::default());
+    builder
+        // `llm_status`/`llm_complete` are registered on every build; only their
+        // engine is feature-gated, so the frontend's IPC surface is stable.
+        .invoke_handler(tauri::generate_handler![
+            walk_document,
+            build_steps,
+            llm::llm_status,
+            llm::llm_complete
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

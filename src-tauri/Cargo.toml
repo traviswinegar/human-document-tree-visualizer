@@ -11,6 +11,20 @@ license.workspace = true
 name = "doctree_tauri_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Default desktop build is native-free: structure pipeline only, zero native
+# deps (ADR-0001). Inference is opt-in via the features below.
+default = []
+# CPU local-LLM (llama.cpp through momusdev_llm). Cascades to `doctree-llm/llm`
+# and lights up the gated engine in `src/llm.rs`. Needs a C++ toolchain (MSVC +
+# CMake) on PATH; a failed native build here must never block the default one.
+llm = ["doctree-llm/llm"]
+# GPU backends — each implies `llm` so the gated code compiles in. Currently
+# blocked on this machine (BUILD_LOG Catch-all: CUDA 13.1 ✗ VS 2026; Vulkan ✗
+# MSVC 14.50). Kept wired so a fixed toolchain is a one-flag rebuild.
+cuda = ["llm", "doctree-llm/cuda"]
+vulkan = ["llm", "doctree-llm/vulkan"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -18,6 +32,13 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# Backend depends on the pure core only — no LLM/GPU — so the desktop shell
-# builds with zero native deps (ADR-0001 decoupling invariant).
+# Backend depends on the pure core only — no LLM/GPU — so the *default* desktop
+# shell builds with zero native deps (ADR-0001 decoupling invariant).
 doctree-core = { path = "../crates/doctree-core" }
+# The gated LLM layer. Non-optional, but native-free by DEFAULT (its own default
+# features are empty): `src/llm.rs` always uses its native-free surface
+# (`LlmConfig`, `Completion`, `LLM_ENABLED`), and only the `llm`/`cuda`/`vulkan`
+# features above turn on `doctree-llm`'s native engine. So the default graph
+# stays native-free (ADR-0001). Path dep on the user's shared sibling crate via
+# doctree-llm — consumed read-only.
+doctree-llm = { path = "../crates/doctree-llm", default-features = false }
