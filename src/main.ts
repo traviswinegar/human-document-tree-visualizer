@@ -76,7 +76,14 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
   // the deterministic structural spine stays static — motion = "inferred".
   .linkDirectionalParticles((l) => (asLink(l).provenance === "semantic" ? 2 : 0))
   .linkDirectionalParticleSpeed(0.006)
-  .linkDirectionalParticleWidth(1.4);
+  .linkDirectionalParticleWidth(1.4)
+  // D1 fluidity: every graphData() during the streamed build reheats the force
+  // sim, so on a large doc the layout was thrashing. A touch more friction calms
+  // the jitter and a finite cooldown lets it settle instead of running forever;
+  // the bigger win is throttling the apply rate (applyIntervalForSize, below).
+  .d3VelocityDecay(0.45)
+  .cooldownTime(12000)
+  .warmupTicks(0);
 
 // Re-assigning the accessors is how 3d-force-graph is told to re-evaluate node /
 // link materials after the highlight state changes.
@@ -173,6 +180,23 @@ function sliderToInterval(v: number): number {
   return Math.round(MAX_INTERVAL_MS * (MIN_INTERVAL_MS / MAX_INTERVAL_MS) ** t);
 }
 
+// D1 — LOD apply throttle. Each graph.graphData() call reheats the entire force
+// simulation, so re-applying on every revealed batch makes a large doc drop
+// frames (the 37 KB stutter). Coalesce applies into a minimum interval that
+// grows with node count: small graphs still repaint every frame (interval 0),
+// big graphs at most a few times a second. A trailing flush (in startBuild)
+// guarantees the final, complete state always lands regardless of throttling.
+function applyIntervalForSize(n: number): number {
+  if (n < 150) return 0;
+  if (n < 400) return 90;
+  if (n < 800) return 170;
+  return 260;
+}
+
+// Cancels any pending trailing apply from the *previous* build before a new one
+// starts, so a late-firing timer can't write stale nodes into the fresh graph.
+let cancelPendingApply: (() => void) | null = null;
+
 function clearSearch(): void {
   searchEl.value = "";
   searchActive = false;
@@ -186,23 +210,70 @@ function clearSearch(): void {
 // the upload and drag-drop paths converge on this one function.
 function startBuild(source: BuildSource): void {
   player?.pause();
+  cancelPendingApply?.(); // drop any trailing apply still queued from the old build
+  cancelPendingApply = null;
   clearSearch();
   graph.graphData({ nodes: [], links: [] });
   statsEl.textContent = `${source.nodeCount} nodes · ${source.edgeCount} edges (${source.origin})`;
 
-  // onProgress now fires ~every frame, and steps arrive in batches, so the old
-  // `step % 4` cadence for re-framing is meaningless. Throttle zoomToFit by
-  // wall-clock instead — refit at most ~4×/s during the build (it's expensive,
-  // and at high speed firing it every frame would erase the batching win).
+  // D1 — coalesced apply. commit() is the single point that writes the revealed
+  // subgraph into the scene; the player can call apply() every frame but on a
+  // large doc we throttle the actual graphData() to applyIntervalForSize(), with
+  // a trailing timer so the latest (superset) state always lands. flushApply()
+  // forces the pending write out immediately (used on build completion).
+  let lastApplyAt = 0;
+  let trailingTimer: number | null = null;
+  let pending: { nodes: GraphNode[]; edges: GraphEdge[] } | null = null;
+
+  const commit = (nodes: GraphNode[], edges: GraphEdge[]): void => {
+    lastApplyAt = performance.now();
+    graph.graphData({
+      nodes: nodes as unknown as NodeObject[],
+      links: edges as unknown as LinkObject[],
+    });
+  };
+  const flushApply = (): void => {
+    if (trailingTimer !== null) {
+      window.clearTimeout(trailingTimer);
+      trailingTimer = null;
+    }
+    if (pending) {
+      commit(pending.nodes, pending.edges);
+      pending = null;
+    }
+  };
+  cancelPendingApply = () => {
+    if (trailingTimer !== null) {
+      window.clearTimeout(trailingTimer);
+      trailingTimer = null;
+    }
+    pending = null;
+  };
+
+  // onProgress fires ~every frame and steps arrive in batches, so re-framing is
+  // throttled by wall-clock too — refit at most ~4×/s during the build (it's
+  // expensive, and firing it every frame would erase the apply-batching win).
   let lastFitAt = 0;
   const p = createBuildPlayer({
     sequence: source.sequence,
     intervalMs: currentIntervalMs,
     apply: (nodes, edges) => {
-      graph.graphData({
-        nodes: nodes as unknown as NodeObject[],
-        links: edges as unknown as LinkObject[],
-      });
+      const interval = applyIntervalForSize(nodes.length);
+      if (interval === 0) {
+        commit(nodes, edges);
+        return;
+      }
+      pending = { nodes, edges };
+      if (trailingTimer !== null) return; // newest state is parked in `pending`
+      const elapsed = performance.now() - lastApplyAt;
+      if (elapsed >= interval) {
+        flushApply();
+      } else {
+        trailingTimer = window.setTimeout(() => {
+          trailingTimer = null;
+          flushApply();
+        }, interval - elapsed);
+      }
     },
     onProgress: (step, total, done) => {
       const pct = total === 0 ? 0 : Math.round((step / total) * 100);
@@ -212,6 +283,7 @@ function startBuild(source: BuildSource): void {
       // Keep the growing graph framed while the build runs; settle on completion.
       const now = performance.now();
       if (done) {
+        flushApply(); // make sure the final batch is on screen before framing it
         graph.zoomToFit(800, 80);
         lastFitAt = now;
       } else if (now - lastFitAt > 250) {
