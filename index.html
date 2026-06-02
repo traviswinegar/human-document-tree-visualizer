@@ -76,10 +76,25 @@
       #open-doc {
         font-weight: 600;
       }
-      #search-count {
+      #search-count,
+      #meaning-count {
         color: #9bb0d6;
         font-size: 12px;
         min-width: 64px;
+      }
+      /* B5 routing line under the stats: document class + resolved pipeline, and
+         a warm hint when the ideal pipeline wasn't compiled into this build. */
+      #routing {
+        font-size: 12px;
+        margin-top: 1px;
+      }
+      #routing .cls {
+        color: #7aa2ff;
+        font-weight: 600;
+        text-transform: capitalize;
+      }
+      #routing .hint {
+        color: #f0b86c;
       }
 
       /* Playback is a compact, faint floating chip so it never competes with the
@@ -426,6 +441,7 @@
     <div id="hud">
       <h1>human-document-tree</h1>
       <div class="meta" id="stats">loading…</div>
+      <div class="meta" id="routing"></div>
     </div>
     <div id="controls">
       <input
@@ -436,6 +452,16 @@
         spellcheck="false"
       />
       <span id="search-count"></span>
+      <input
+        id="meaning-search"
+        class="hidden"
+        type="search"
+        placeholder="Find by meaning…"
+        title="Rank nodes by embedding similarity (press Enter)"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <span id="meaning-count" class="hidden"></span>
       <button id="open-doc" type="button">Open document</button>
       <button id="reset" type="button">Reset view</button>
     </div>

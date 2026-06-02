@@ -3,7 +3,13 @@ import type { NodeObject, LinkObject } from "3d-force-graph";
 import type { GraphNode, GraphEdge, NodeKind, Provenance } from "./types";
 import { nodeColor, nodeSize, edgeColor } from "./colors";
 import { buildSequence, createBuildPlayer, type BuildPlayer } from "./build-player";
-import { loadBuildSource, type BuildSource } from "./doc-source";
+import {
+  loadBuildSource,
+  searchByMeaning,
+  defaultDocument,
+  type BuildSource,
+  type ResolvedPipeline,
+} from "./doc-source";
 
 // 3d-force-graph's accessors hand back the library's NodeObject/LinkObject; our
 // schema props ride along on the same objects, so we narrow with a cast.
@@ -27,6 +33,9 @@ const container = document.getElementById("graph")!;
 const statsEl = document.getElementById("stats")!;
 const searchEl = document.getElementById("search") as HTMLInputElement;
 const searchCountEl = document.getElementById("search-count")!;
+const meaningSearchEl = document.getElementById("meaning-search") as HTMLInputElement;
+const meaningCountEl = document.getElementById("meaning-count")!;
+const routingEl = document.getElementById("routing")!;
 const resetEl = document.getElementById("reset") as HTMLButtonElement;
 const playPauseEl = document.getElementById("playpause") as HTMLButtonElement;
 const replayEl = document.getElementById("replay") as HTMLButtonElement;
@@ -43,9 +52,21 @@ const nodeDetailsEl = document.getElementById("node-details")!;
 
 // Search/highlight state. When a search is active, matched nodes keep full color
 // and the rest dim out, so a query reads as "light up the matches" against the
-// dark graph.
+// dark graph. Both the literal search and the B4 "find by meaning" search write
+// to this one channel (they're mutually exclusive views of the same highlight).
 const matched = new Set<string>();
 let searchActive = false;
+
+// The text of the document currently on screen. Tracked so the B4 meaning search
+// (which re-walks + embeds the same text on the backend) has something to query.
+let currentText = defaultDocument;
+
+// Human labels for the resolved pipeline shown on the B5 routing line.
+const PIPELINE_LABEL: Record<ResolvedPipeline, string> = {
+  semantic_build: "hybrid (LLM)",
+  embedded_build: "similarity",
+  structural_build: "structural",
+};
 
 // Selection/highlight state (D2). Clicking a node lights it, its incident edges
 // and immediate neighbors and dims the rest — through the *same* dimming channel
@@ -385,6 +406,10 @@ nodeDetailsEl.addEventListener("click", (e) => {
 });
 
 function runSearch(): void {
+  // Literal search owns the highlight channel while active; drop any stale
+  // meaning-search hits so the two never blend.
+  meaningSearchEl.value = "";
+  meaningCountEl.textContent = "";
   const q = searchEl.value.trim().toLowerCase();
   searchActive = q.length > 0;
   matched.clear();
@@ -411,6 +436,8 @@ function runSearch(): void {
 
 function resetView(): void {
   searchEl.value = "";
+  meaningSearchEl.value = "";
+  meaningCountEl.textContent = "";
   searchActive = false;
   matched.clear();
   searchCountEl.textContent = "";
@@ -422,6 +449,65 @@ function resetView(): void {
   graph.zoomToFit(800, 60);
 }
 
+// B4 "find by meaning": rank the document's nodes by embedding similarity to the
+// query (desktop + `vectordb` only — the box is hidden otherwise) and light the
+// hits through the same dimming channel as the literal search. Each call is an
+// embedding round-trip, so it fires on Enter, not per keystroke.
+async function runMeaningSearch(): Promise<void> {
+  const q = meaningSearchEl.value.trim();
+  if (q.length === 0) {
+    // Clearing the box drops its highlight.
+    matched.clear();
+    searchActive = false;
+    meaningCountEl.textContent = "";
+    refresh();
+    return;
+  }
+  meaningCountEl.textContent = "…";
+  try {
+    const hits = await searchByMeaning(q, currentText);
+    // Take over the highlight channel from any literal search.
+    searchEl.value = "";
+    searchCountEl.textContent = "";
+    matched.clear();
+    for (const h of hits) matched.add(h.id);
+    searchActive = matched.size > 0;
+    refresh();
+    meaningCountEl.textContent = `${hits.length} hit${hits.length === 1 ? "" : "s"}`;
+    // Fly to the best (already-revealed) hit, if any.
+    if (hits.length > 0) {
+      const best = graph.graphData().nodes.find((n) => asNode(n).id === hits[0].id);
+      if (best) focusNode(best);
+    }
+  } catch (err) {
+    console.error("meaning search failed:", err);
+    meaningCountEl.textContent = "search failed";
+  }
+}
+
+// B5 routing line under the stats: the document class + confidence + the pipeline
+// actually run, plus a warm hint when the ideal pipeline wasn't compiled in (or a
+// model was missing and we fell back to the spine). On the browser/WASM path
+// there's no classifier, so it reads as the in-browser structural walk.
+function renderRouting(source: BuildSource): void {
+  const r = source.routing;
+  if (!r) {
+    routingEl.textContent = source.origin === "fixture" ? "" : "structural · in-browser walk";
+    return;
+  }
+  const conf = Math.round(r.confidence * 100);
+  const pipeline = source.fellBack ? "structural" : PIPELINE_LABEL[r.resolvedPipeline];
+  let html = `<span class="cls">${r.class}</span> · ${conf}% · ${pipeline}`;
+  if (source.fellBack) {
+    html += ` <span class="hint">· no model on disk; using the spine</span>`;
+  } else if (r.downgraded) {
+    const want =
+      r.recommendedPipeline === "narrative_hybrid" ? "--features llm" : "--features vectordb";
+    html += ` <span class="hint">· rebuild with ${want} for richer extraction</span>`;
+  }
+  routingEl.innerHTML = html;
+}
+
 searchEl.addEventListener("input", runSearch);
 searchEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && matched.size > 0) {
@@ -429,6 +515,14 @@ searchEl.addEventListener("keydown", (e) => {
     const hit = graph.graphData().nodes.find((n) => asNode(n).id === id);
     if (hit) focusNode(hit);
   }
+});
+// Meaning search fires on Enter (each call is a backend embedding round-trip);
+// emptying the box clears its highlight immediately.
+meaningSearchEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") void runMeaningSearch();
+});
+meaningSearchEl.addEventListener("input", () => {
+  if (meaningSearchEl.value.trim() === "") void runMeaningSearch();
 });
 resetEl.addEventListener("click", resetView);
 
@@ -495,6 +589,8 @@ let cancelPendingApply: (() => void) | null = null;
 
 function clearSearch(): void {
   searchEl.value = "";
+  meaningSearchEl.value = "";
+  meaningCountEl.textContent = "";
   searchActive = false;
   matched.clear();
   searchCountEl.textContent = "";
@@ -515,6 +611,11 @@ function startBuild(source: BuildSource): void {
   graph.graphData({ nodes: [], links: [] });
   sidebarDocEl.innerHTML = '<div class="doc-empty">building…</div>';
   statsEl.textContent = `${source.nodeCount} nodes · ${source.edgeCount} edges (${source.origin})`;
+  renderRouting(source); // B5 — surface the class + resolved pipeline / downgrade
+  // B4 — offer "find by meaning" only on a build that can actually embed.
+  const meaningOn = Boolean(source.routing?.capabilities.vectordb);
+  meaningSearchEl.classList.toggle("hidden", !meaningOn);
+  meaningCountEl.classList.toggle("hidden", !meaningOn);
 
   // D1 — coalesced apply. commit() is the single point that writes the revealed
   // subgraph into the scene; the player can call apply() every frame but on a
@@ -621,6 +722,7 @@ function startBuild(source: BuildSource): void {
 // be slow on a big document, so we surface a "walking…" state before the await.
 async function loadAndBuild(text?: string, label?: string): Promise<void> {
   statsEl.textContent = label ? `walking ${label}…` : "walking…";
+  currentText = text ?? defaultDocument; // remember it for the meaning search
   try {
     const source = await loadBuildSource(text);
     startBuild(source);
