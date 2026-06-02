@@ -93,14 +93,26 @@ while it compiles.
 
 ## Current Position
 
-**A1 — create the Cargo workspace + `doctree-core` skeleton + first failing
-test.** Substrate committed at `ef7b369`. Starting feature code now.
+**B1 — stand up `crates/doctree-llm`: optional `momusdev_llm` dependency behind a
+`llm` feature (cuda/vulkan/vectordb sub-features), a thin `InferenceEngine`
+wrapper, and a default workspace build that stays green with zero native deps.**
+Stream A native-free core complete (A1–A4); kicking the long CUDA compile in the
+background per the interleave plan.
 
 ---
 
 ## Completed entries (verification triples — append only after commit)
 
-- _(none yet — substrate scaffold `ef7b369` predates the walk plan)_
+- **A1** — Cargo workspace + `doctree-core` skeleton.
+  Commit `1fe0130` · test `crates/doctree-core/src/lib.rs::tests::crate_builds_and_test_harness_runs` (`cargo test -p doctree-core`) · src `crates/doctree-core/src/lib.rs:10` (`CRATE_NAME`).
+- **A2** — graph schema (narrative ontology) + shared fixture.
+  Commit `d050b88` · tests `crates/doctree-core/src/schema.rs::tests::*` (8) + `crates/doctree-core/tests/fixture_loads.rs::sample_narrative_fixture_is_schema_valid` · src `crates/doctree-core/src/schema.rs` (`Graph`, `NodeKind`, `EdgeKind`, `Provenance`), fixture `fixtures/sample-narrative.graph.json`.
+  Note: ADR-0002 deferred to A3 close so it covers schema + grammar as one immutable record.
+- **A3** — GBNF extraction grammar (semantic subset) + deterministic linter + ADR-0002.
+  Commit `1de780d` · tests `crates/doctree-core/src/grammar.rs::tests::*` (7, incl. `grammar_is_subset_of_schema`, `lint_*`) · src `crates/doctree-core/src/grammar.rs` (`GRAPH_GBNF`, `graph_grammar`, `lint_gbnf`), ADR `docs/adr/ADR-0002-graph-schema-and-gbnf-grammar.md`.
+  Open risk: `inference.rs` warns the GBNF parser rejects ~5+ alternatives in one production; the 6-alt `nodekind`/`edgekind` rules must be re-verified at first real grammar compile (B2).
+- **A4** — deterministic structure walker (the graph spine).
+  Commit `81805da` · tests `crates/doctree-core/src/walker.rs::tests::*` (13, incl. `walk_is_deterministic`, `spine_graph_is_referentially_valid`) + `crates/doctree-core/tests/fixture_loads.rs::walking_the_sample_text_yields_a_valid_nontrivial_spine` · src `crates/doctree-core/src/walker.rs` (`walk`, `walk_with`, `WalkOptions`).
 
 ---
 
