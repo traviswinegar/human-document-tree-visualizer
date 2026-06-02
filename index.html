@@ -146,6 +146,36 @@
         white-space: nowrap;
         min-width: 70px;
       }
+      /* Speed slider: re-paces the build animation (right = faster). Styled to
+         match the chip's thin-track aesthetic in both WebKit and Firefox. */
+      #playback input[type="range"] {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 72px;
+        height: 4px;
+        margin: 0;
+        border-radius: 2px;
+        background: rgba(122, 162, 255, 0.18);
+        cursor: pointer;
+        outline: none;
+      }
+      #playback input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: #7aa2ff;
+        cursor: pointer;
+      }
+      #playback input[type="range"]::-moz-range-thumb {
+        width: 12px;
+        height: 12px;
+        border: none;
+        border-radius: 50%;
+        background: #7aa2ff;
+        cursor: pointer;
+      }
 
       /* Full-window drop target hint, shown only while dragging a file over. */
       #drop-hint {
@@ -201,6 +231,15 @@
       <button id="replay" type="button" title="Replay build" aria-label="Replay build">⟳</button>
       <div id="build-bar"><div id="build-bar-fill"></div></div>
       <span id="build-progress"></span>
+      <input
+        id="speed"
+        type="range"
+        min="0"
+        max="100"
+        value="0"
+        title="Build speed (drag right = faster)"
+        aria-label="Build speed"
+      />
     </div>
     <div id="drop-hint"><div class="box">Drop a .txt or .md document to visualize</div></div>
     <div id="graph"></div>

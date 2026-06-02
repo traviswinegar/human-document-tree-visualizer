@@ -35,6 +35,7 @@ const buildBarFillEl = document.getElementById("build-bar-fill")!;
 const openDocEl = document.getElementById("open-doc") as HTMLButtonElement;
 const fileInputEl = document.getElementById("file-input") as HTMLInputElement;
 const dropHintEl = document.getElementById("drop-hint")!;
+const speedEl = document.getElementById("speed") as HTMLInputElement;
 
 // Search/highlight state. When a search is active, matched nodes keep full color
 // and the rest dim out, so a query reads as "light up the matches" against the
@@ -155,6 +156,21 @@ const ICON_REPLAY = "⟳";
 // chip controls below read it through this binding (null until the first build).
 let player: BuildPlayer | null = null;
 
+// Build-animation pacing. The walk itself is instant — this only throttles the
+// on-screen reveal. The slider spans MAX (the original deliberate pace) down to
+// MIN (as fast as the per-step graphData() reheat stays visually coherent; below
+// this the render loop, not the timer, is the floor). Persisted across rebuilds.
+const MIN_INTERVAL_MS = 12;
+const MAX_INTERVAL_MS = 220;
+let currentIntervalMs = MAX_INTERVAL_MS;
+
+// Slider 0 → slowest (MAX), 100 → fastest (MIN). Geometric, not linear: perceived
+// speed is multiplicative, so equal slider steps feel like equal speed changes.
+function sliderToInterval(v: number): number {
+  const t = Math.min(1, Math.max(0, v / 100));
+  return Math.round(MAX_INTERVAL_MS * (MIN_INTERVAL_MS / MAX_INTERVAL_MS) ** t);
+}
+
 function clearSearch(): void {
   searchEl.value = "";
   searchActive = false;
@@ -174,7 +190,7 @@ function startBuild(source: BuildSource): void {
 
   const p = createBuildPlayer({
     sequence: source.sequence,
-    intervalMs: 220,
+    intervalMs: currentIntervalMs,
     apply: (nodes, edges) => {
       graph.graphData({
         nodes: nodes as unknown as NodeObject[],
@@ -247,6 +263,15 @@ replayEl.addEventListener("click", () => {
   if (!player) return;
   clearSearch();
   player.replay();
+});
+
+// Speed slider re-paces the current build live and is remembered for the next
+// one. Sync the starting pace from the slider's initial position so the HTML
+// default and currentIntervalMs can't drift apart.
+currentIntervalMs = sliderToInterval(Number(speedEl.value));
+speedEl.addEventListener("input", () => {
+  currentIntervalMs = sliderToInterval(Number(speedEl.value));
+  player?.setSpeed(currentIntervalMs);
 });
 
 // Upload: the visible button proxies the hidden <input type=file>; resetting its

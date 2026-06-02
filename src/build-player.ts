@@ -47,6 +47,8 @@ export interface BuildPlayer {
   pause(): void;
   toggle(): void;
   replay(): void;
+  // Re-pace the animation. Takes effect immediately, even mid-build.
+  setSpeed(intervalMs: number): void;
   isPlaying(): boolean;
   isDone(): boolean;
 }
@@ -62,7 +64,9 @@ export interface BuildPlayerOptions {
 }
 
 export function createBuildPlayer(opts: BuildPlayerOptions): BuildPlayer {
-  const { sequence, intervalMs, apply, onProgress } = opts;
+  const { sequence, apply, onProgress } = opts;
+  // Mutable so the speed slider can re-pace a build already in flight.
+  let intervalMs = opts.intervalMs;
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   let step = 0;
@@ -112,6 +116,16 @@ export function createBuildPlayer(opts: BuildPlayerOptions): BuildPlayer {
     report();
   }
 
+  // Change the per-step cadence. If a build is running, restart the timer so the
+  // new speed applies right away rather than only on the next play().
+  function setSpeed(ms: number): void {
+    intervalMs = ms;
+    if (timer !== null) {
+      window.clearInterval(timer);
+      timer = window.setInterval(tick, intervalMs);
+    }
+  }
+
   return {
     play,
     pause,
@@ -120,6 +134,7 @@ export function createBuildPlayer(opts: BuildPlayerOptions): BuildPlayer {
       reset();
       play();
     },
+    setSpeed,
     isPlaying: () => timer !== null,
     isDone: () => step >= sequence.length,
   };
