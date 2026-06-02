@@ -621,6 +621,36 @@ autonomously):** _[HISTORY — all three below are now RESOLVED in Phase 6: GPU 
   visualization, native-free; pick them up if live slider-tuning shows charge alone
   isn't enough, or if the user wants the community structure color-coded.
 
+- **🔴 HIGH — semantic layer silently falls back on the 400-page novel:
+  `semantic_build_steps` throws *after* a successful extraction (blocks the #67
+  clustering feature's intended semantic lens).** _(discovered 2026-06-02 while
+  relaunching to tune the #67 `#cluster` slider; the routing line read
+  "Narrative · 100% · structural · no model on disk; using the spine" with all
+  46,477 edges `structural`.)_ The launcher log **disproves** the on-screen label —
+  the model loaded (qwen3-4b, 36 layers CPU, KV cache + context built) AND the
+  grammar-constrained extraction **succeeded**:
+  `[LLM gbnf] prompt_tokens=623, completion_tokens=734, inference_ms=95618,
+  output_bytes=2678/16384` — 2,678 bytes of JSON in ~96 s, stopped at EOS (not the
+  token cap, unlike the #37 runaway). Yet the frontend shows `fellBack=true`, which
+  (`doc-source.ts:212-215`) is set **only** when `invoke(semantic_build_steps)`
+  *throws*. So the backend errored **after** inference — in deserialize
+  (`serde_json::from_str` of the 2,678 bytes into the `Graph` fragment),
+  `merge_semantic_onto_spine`, or `build_sequence` over the 18 437-node /
+  46 477-edge spine. #37 confirmed this exact path works on a SMALL narrative
+  ("The Keeper of Harbor's End"); the new variable is **scale**. Two faults: (a) the
+  **misleading hint** — `main.ts:1052` hardcodes "no model on disk" for *any*
+  fallback, asserting a cause it never checked (the model is present and ran); make
+  it generic or surface the real backend error; (b) the **actual post-inference
+  throw**. **Repro path:** `scripts/test-llm-live.cmd` runs the #37 `#[ignore]` live
+  test but on the small fixture — needs a large-doc variant (or temporary backend
+  logging of the raw model output + the error string) to catch the throw. Test-first
+  per the kernel: a failing test feeding a realistic model fragment + a large spine
+  to the deserializer / `merge_semantic_onto_spine` that reproduces the error, then
+  the fix. Until fixed, the #67 clustering force runs over **structural** communities
+  only, not the semantic cross-links the user chose as the lens (ADR-00012). Not
+  fixed inline (off-topic to the clustering ship; surfaced for promotion, as #37 was
+  promoted from a Catch-all HIGH by a user screenshot).
+
 ---
 
 ## Recovery protocol (for the post-compaction self)
