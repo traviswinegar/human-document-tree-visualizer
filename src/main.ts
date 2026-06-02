@@ -3,7 +3,7 @@ import type { NodeObject, LinkObject } from "3d-force-graph";
 import { Vector2 } from "three";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
-import type { GraphNode, GraphEdge, NodeKind, Provenance } from "./types";
+import type { GraphNode, GraphEdge, NodeKind, EdgeKind, Provenance } from "./types";
 import { nodeColor, nodeSize, edgeColor } from "./colors";
 import { buildSequence, createBuildPlayer, type BuildPlayer } from "./build-player";
 import {
@@ -34,6 +34,10 @@ const withAlpha = (hex: string, a: number): string => {
 
 const container = document.getElementById("graph")!;
 const statsEl = document.getElementById("stats")!;
+const statsBodyEl = document.getElementById("stats-body")!;
+const statsCollapseEl = document.getElementById("stats-collapse") as HTMLButtonElement;
+const statsReopenEl = document.getElementById("stats-reopen") as HTMLButtonElement;
+const playbackEl = document.getElementById("playback")!;
 const semanticStatusEl = document.getElementById("semantic-status")!;
 const layoutEl = document.getElementById("layout") as HTMLSelectElement;
 const searchEl = document.getElementById("search") as HTMLInputElement;
@@ -417,18 +421,163 @@ function renderSidebar(nodes: GraphNode[]): void {
   sidebarDocEl.innerHTML = html || '<div class="doc-empty">…</div>';
 }
 
-// --- D3: layout — the 3D canvas yields width to the sidebar -----------------
+// --- #43: left panel — statistical analysis of the document's structure ------
+// Computed purely from the nodes/edges currently on screen (native-free, so it
+// works identically on the desktop, browser-WASM, and fixture paths) and
+// re-rendered on every throttled commit, so the figures grow in step with the
+// build. Kinds are walked in a fixed structural order — not sorted by count — so
+// the panel doesn't reshuffle its rows as the spine streams in.
+const NODE_KIND_ORDER: NodeKind[] = [
+  "section", "paragraph", "sentence", "clause", "quote", "reference",
+  "term", "character", "place", "concept", "event", "object", "group",
+];
+const EDGE_KIND_ORDER: EdgeKind[] = [
+  "part_of", "precedes", "mentions", "references", "quotes", "co_occurs_with",
+  "interacts_with", "located_in", "relates_to", "causes", "similar_to",
+];
+const PROV_ORDER: Provenance[] = ["structural", "semantic", "embedding"];
+
+function renderStats(nodes: GraphNode[], edges: GraphEdge[]): void {
+  if (nodes.length === 0) {
+    statsBodyEl.innerHTML = '<div class="stat-empty">analyzing…</div>';
+    return;
+  }
+
+  // One pass each: node-kind tally; edge-kind + provenance tally; node degree
+  // (incident edge count, used to rank the key terms). idOf handles links whose
+  // endpoints graphData() has already resolved from id strings to node objects.
+  const nodeKind = new Map<NodeKind, number>();
+  for (const n of nodes) nodeKind.set(n.kind, (nodeKind.get(n.kind) ?? 0) + 1);
+  const edgeKind = new Map<EdgeKind, number>();
+  const edgeProv = new Map<Provenance, number>();
+  const degree = new Map<string, number>();
+  for (const e of edges) {
+    edgeKind.set(e.kind, (edgeKind.get(e.kind) ?? 0) + 1);
+    edgeProv.set(e.provenance, (edgeProv.get(e.provenance) ?? 0) + 1);
+    const s = idOf(e.source);
+    const t = idOf(e.target);
+    degree.set(s, (degree.get(s) ?? 0) + 1);
+    degree.set(t, (degree.get(t) ?? 0) + 1);
+  }
+
+  const count = (k: NodeKind): number => nodeKind.get(k) ?? 0;
+  const ratio = (a: number, b: number): string => (b > 0 ? (a / b).toFixed(1) : "—");
+
+  // Composition — node kinds present, each a count + a bar scaled to the biggest.
+  const maxNode = Math.max(1, ...NODE_KIND_ORDER.map((k) => count(k)));
+  let comp = "";
+  for (const k of NODE_KIND_ORDER) {
+    const c = count(k);
+    if (c === 0) continue;
+    const col = nodeColor(k);
+    const pct = Math.round((c / maxNode) * 100);
+    comp +=
+      `<div class="stat-row">` +
+      `<span class="stat-swatch" style="background:${col}"></span>` +
+      `<span class="stat-name">${esc(k)}</span>` +
+      `<span class="stat-bar"><span class="stat-bar-fill" style="width:${pct}%;background:${col}"></span></span>` +
+      `<span class="stat-count">${c.toLocaleString()}</span>` +
+      `</div>`;
+  }
+
+  // Connections — edge kinds present + a provenance split (deterministic spine
+  // vs. LLM-semantic vs. embedding-similarity), so the inferred share reads at a
+  // glance against the structural backbone.
+  const maxEdge = Math.max(1, ...EDGE_KIND_ORDER.map((k) => edgeKind.get(k) ?? 0));
+  let conn = "";
+  for (const k of EDGE_KIND_ORDER) {
+    const c = edgeKind.get(k) ?? 0;
+    if (c === 0) continue;
+    const col = edgeColor(k);
+    const pct = Math.round((c / maxEdge) * 100);
+    conn +=
+      `<div class="stat-row">` +
+      `<span class="stat-swatch" style="background:${col}"></span>` +
+      `<span class="stat-name">${esc(k.replace(/_/g, " "))}</span>` +
+      `<span class="stat-bar"><span class="stat-bar-fill" style="width:${pct}%;background:${col}"></span></span>` +
+      `<span class="stat-count">${c.toLocaleString()}</span>` +
+      `</div>`;
+  }
+  let prov = "";
+  for (const p of PROV_ORDER) {
+    const c = edgeProv.get(p) ?? 0;
+    if (c === 0) continue;
+    prov += `<span><span class="dot" style="background:${PROV_META[p].dot}"></span>${esc(p)} ${c.toLocaleString()}</span>`;
+  }
+
+  // Shape — derived ratios that characterize the prose. Words are summed from the
+  // sentence text (the only word-bearing nodes), so they grow with the spine too.
+  let words = 0;
+  for (const n of nodes) {
+    if (n.kind === "sentence" && n.text) {
+      const w = n.text.trim();
+      if (w) words += w.split(/\s+/).length;
+    }
+  }
+  const sentences = count("sentence");
+  const metrics: Array<[string, string]> = [
+    ["Words", words > 0 ? words.toLocaleString() : "—"],
+    ["Words / sentence", ratio(words, sentences)],
+    ["Clauses / sentence", ratio(count("clause"), sentences)],
+    ["Sentences / paragraph", ratio(sentences, count("paragraph"))],
+    ["Edges / node", ratio(edges.length, nodes.length)],
+  ];
+  const shape = metrics
+    .map(
+      ([k, v]) =>
+        `<div class="stat-metric"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`
+    )
+    .join("");
+
+  // Key terms — the most-connected term nodes (the document's conceptual hubs),
+  // clickable to select the node through the same channel as the sidebar text.
+  const terms = nodes.filter((n) => n.kind === "term");
+  terms.sort((a, b) => (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0));
+  let termsHtml = "";
+  for (const t of terms.slice(0, 14)) {
+    const d = degree.get(t.id) ?? 0;
+    termsHtml += `<span class="stat-term" data-node-id="${esc(t.id)}">${esc(t.label)}<span class="deg">${d}</span></span>`;
+  }
+
+  let html = "";
+  html += `<div class="stat-section"><div class="stat-h">Composition · ${nodes.length.toLocaleString()} nodes</div>${comp}</div>`;
+  html += `<div class="stat-section"><div class="stat-h">Connections · ${edges.length.toLocaleString()} edges</div>${conn || '<div class="stat-empty">none yet</div>'}${prov ? `<div class="stat-prov">${prov}</div>` : ""}</div>`;
+  html += `<div class="stat-section"><div class="stat-h">Shape</div>${shape}</div>`;
+  if (termsHtml) {
+    html += `<div class="stat-section"><div class="stat-h">Key terms</div><div class="stat-terms">${termsHtml}</div></div>`;
+  }
+  statsBodyEl.innerHTML = html;
+}
+
+// --- D3: layout — the 3D canvas is the middle column ------------------------
+// It yields width on the left to the stats panel (#43) and on the right to the
+// document sidebar (D3), and offsets its own left edge so it never renders under
+// either docked panel. The playback chip rides the same left offset so it clears
+// the stats panel when that panel is open.
 const SIDEBAR_W = 360;
+const LEFT_W = 300;
 let sidebarOpen = true;
+let statsOpen = true;
 
 function layoutGraph(): void {
-  const w = sidebarOpen ? window.innerWidth - SIDEBAR_W : window.innerWidth;
+  const left = statsOpen ? LEFT_W : 0;
+  const right = sidebarOpen ? SIDEBAR_W : 0;
+  const w = window.innerWidth - left - right;
+  container.style.left = `${left}px`;
   graph.width(Math.max(320, w)).height(window.innerHeight);
+  playbackEl.style.left = `${left + 16}px`;
 }
 
 function setSidebar(open: boolean): void {
   sidebarOpen = open;
   document.body.classList.toggle("sidebar-collapsed", !open);
+  layoutGraph();
+  graph.zoomToFit(600, 80);
+}
+
+function setStats(open: boolean): void {
+  statsOpen = open;
+  document.body.classList.toggle("stats-collapsed", !open);
   layoutGraph();
   graph.zoomToFit(600, 80);
 }
@@ -697,6 +846,15 @@ window.addEventListener("keydown", (e) => {
 sidebarCollapseEl.addEventListener("click", () => setSidebar(false));
 sidebarReopenEl.addEventListener("click", () => setSidebar(true));
 
+// Stats panel collapse/reopen (mirrors the sidebar). Clicking a key-term chip
+// selects that node through the same channel as the sidebar text + details panel.
+statsCollapseEl.addEventListener("click", () => setStats(false));
+statsReopenEl.addEventListener("click", () => setStats(true));
+statsBodyEl.addEventListener("click", (e) => {
+  const el = (e.target as HTMLElement).closest("[data-node-id]");
+  if (el) selectNodeById(el.getAttribute("data-node-id")!);
+});
+
 window.addEventListener("resize", layoutGraph);
 // Narrow the canvas for the sidebar (open by default) before the first build.
 layoutGraph();
@@ -772,6 +930,7 @@ function startBuild(source: BuildSource): void {
   clearSearch();
   graph.graphData({ nodes: [], links: [] });
   sidebarDocEl.innerHTML = '<div class="doc-empty">building…</div>';
+  statsBodyEl.innerHTML = '<div class="stat-empty">analyzing…</div>';
   statsEl.textContent = `${source.nodeCount} nodes · ${source.edgeCount} edges (${source.origin})`;
   renderRouting(source); // B5 — surface the class + resolved pipeline / downgrade
   setSemanticPending(false); // cleared now; turned on below if a delta is pending
@@ -800,6 +959,7 @@ function startBuild(source: BuildSource): void {
     // unpinned, so re-pin the live set each commit to keep the strata crisp.
     if (currentLayout === "layers") pinLayers(graph.graphData().nodes);
     renderSidebar(nodes); // D3 — unfold the document in step with the graph
+    renderStats(nodes, edges); // #43 — refresh the left analysis panel in step
   };
   const flushApply = (): void => {
     if (trailingTimer !== null) {
