@@ -2,8 +2,8 @@ import ForceGraph3D from "3d-force-graph";
 import type { NodeObject, LinkObject } from "3d-force-graph";
 import type { GraphNode, GraphEdge } from "./types";
 import { nodeColor, nodeSize, edgeColor } from "./colors";
-import { buildSequence, createBuildPlayer } from "./build-player";
-import { loadBuildSource } from "./doc-source";
+import { buildSequence, createBuildPlayer, type BuildPlayer } from "./build-player";
+import { loadBuildSource, type BuildSource } from "./doc-source";
 
 // 3d-force-graph's accessors hand back the library's NodeObject/LinkObject; our
 // schema props ride along on the same objects, so we narrow with a cast.
@@ -31,6 +31,10 @@ const resetEl = document.getElementById("reset") as HTMLButtonElement;
 const playPauseEl = document.getElementById("playpause") as HTMLButtonElement;
 const replayEl = document.getElementById("replay") as HTMLButtonElement;
 const buildProgressEl = document.getElementById("build-progress")!;
+const buildBarFillEl = document.getElementById("build-bar-fill")!;
+const openDocEl = document.getElementById("open-doc") as HTMLButtonElement;
+const fileInputEl = document.getElementById("file-input") as HTMLInputElement;
+const dropHintEl = document.getElementById("drop-hint")!;
 
 // Search/highlight state. When a search is active, matched nodes keep full color
 // and the rest dim out, so a query reads as "light up the matches" against the
@@ -137,16 +141,38 @@ window.addEventListener("resize", () => {
   graph.width(window.innerWidth).height(window.innerHeight);
 });
 
-// --- A8: animated build from the live source (Tauri walker, or fixture) ------
-// The sequence is resolved asynchronously: in the Tauri shell it's the live
-// Rust walk of the document; in a plain browser it's the baked fixture. Either
-// way it's the same BuildEvent[] the player consumes, so everything below the
-// await is origin-agnostic.
-async function initBuild(): Promise<void> {
-  const source = await loadBuildSource();
+// --- A8 / C1: animated build from a live source, with re-ingest -------------
+// A "source" is resolved asynchronously and is origin-agnostic: in the Tauri
+// shell it's the native Rust walk; in a plain browser it's the same walker via
+// WASM; the baked fixture is the last-resort fallback. C1 lets the user replace
+// the document at runtime (Open / drag-drop), so the build is rebuildable: each
+// new document tears down the old player and starts a fresh streamed build.
+const ICON_PLAY = "▶";
+const ICON_PAUSE = "⏸";
+const ICON_REPLAY = "⟳";
+
+// The single live player. Re-pointed every time a new document is ingested; the
+// chip controls below read it through this binding (null until the first build).
+let player: BuildPlayer | null = null;
+
+function clearSearch(): void {
+  searchEl.value = "";
+  searchActive = false;
+  matched.clear();
+  searchCountEl.textContent = "";
+  refresh();
+}
+
+// Tear down any running build and stream a fresh one from `source`. Everything
+// that differs per-document (counts, sequence, dev handles) flows from here, so
+// the upload and drag-drop paths converge on this one function.
+function startBuild(source: BuildSource): void {
+  player?.pause();
+  clearSearch();
+  graph.graphData({ nodes: [], links: [] });
   statsEl.textContent = `${source.nodeCount} nodes · ${source.edgeCount} edges (${source.origin})`;
 
-  const player = createBuildPlayer({
+  const p = createBuildPlayer({
     sequence: source.sequence,
     intervalMs: 220,
     apply: (nodes, edges) => {
@@ -156,32 +182,17 @@ async function initBuild(): Promise<void> {
       });
     },
     onProgress: (step, total, done) => {
-      playPauseEl.textContent = player.isPlaying() ? "Pause" : done ? "Replay" : "Play";
-      buildProgressEl.textContent = done
-        ? "build complete — explore"
-        : `building ${step}/${total}`;
+      const pct = total === 0 ? 0 : Math.round((step / total) * 100);
+      buildBarFillEl.style.width = `${done ? 100 : pct}%`;
+      playPauseEl.textContent = p.isPlaying() ? ICON_PAUSE : done ? ICON_REPLAY : ICON_PLAY;
+      buildProgressEl.textContent = done ? "ready" : `${step}/${total}`;
       // Keep the growing graph framed while the build runs; settle on completion.
       if (done) graph.zoomToFit(800, 80);
       else if (step % 4 === 0) graph.zoomToFit(500, 80);
     },
   });
-
-  playPauseEl.addEventListener("click", () => {
-    // After completion the button replays; otherwise it toggles play/pause.
-    if (player.isDone()) player.replay();
-    else player.toggle();
-    playPauseEl.textContent = player.isPlaying() ? "Pause" : "Play";
-  });
-  replayEl.addEventListener("click", () => {
-    searchEl.value = "";
-    searchActive = false;
-    matched.clear();
-    searchCountEl.textContent = "";
-    refresh();
-    player.replay();
-  });
-
-  player.play();
+  player = p;
+  p.play();
 
   // Dev-only handle so the running 3D scene is inspectable from the page console
   // / preview tooling (WebGL canvases can't be verified via readPixels under the
@@ -189,7 +200,7 @@ async function initBuild(): Promise<void> {
   if (import.meta.env.DEV) {
     Object.assign(window as object, {
       __doctreeGraph: graph,
-      __doctreePlayer: player,
+      __doctreePlayer: p,
       __doctreeSequence: source.sequence,
       __doctreeBuildSequence: buildSequence,
       __doctreeSource: source,
@@ -197,4 +208,76 @@ async function initBuild(): Promise<void> {
   }
 }
 
-void initBuild();
+// Resolve the walk for `text` (or the bundled default), then build. Walking can
+// be slow on a big document, so we surface a "walking…" state before the await.
+async function loadAndBuild(text?: string, label?: string): Promise<void> {
+  statsEl.textContent = label ? `walking ${label}…` : "walking…";
+  try {
+    const source = await loadBuildSource(text);
+    startBuild(source);
+  } catch (err) {
+    console.error("walk failed:", err);
+    statsEl.textContent = "walk failed — see console";
+  }
+}
+
+// Read a dropped/selected file as text and rebuild from it. Phase 1 only ingests
+// plain text / markdown, so a naive readAsText is exactly right.
+function ingestFile(file: File): void {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const text = typeof reader.result === "string" ? reader.result : "";
+    void loadAndBuild(text, file.name);
+  };
+  reader.onerror = () => {
+    statsEl.textContent = `could not read ${file.name}`;
+  };
+  reader.readAsText(file);
+}
+
+// Chip controls are wired once; they act on whatever the current `player` is.
+playPauseEl.addEventListener("click", () => {
+  if (!player) return;
+  // After completion the button replays; otherwise it toggles play/pause.
+  if (player.isDone()) player.replay();
+  else player.toggle();
+  playPauseEl.textContent = player.isPlaying() ? ICON_PAUSE : ICON_PLAY;
+});
+replayEl.addEventListener("click", () => {
+  if (!player) return;
+  clearSearch();
+  player.replay();
+});
+
+// Upload: the visible button proxies the hidden <input type=file>; resetting its
+// value after each pick lets the user re-select the same file to re-walk it.
+openDocEl.addEventListener("click", () => fileInputEl.click());
+fileInputEl.addEventListener("change", () => {
+  const file = fileInputEl.files?.[0];
+  if (file) ingestFile(file);
+  fileInputEl.value = "";
+});
+
+// Drag-drop anywhere on the window. dragenter/leave nest, so we count depth and
+// only hide the hint when the last overlapping element is left.
+let dragDepth = 0;
+window.addEventListener("dragenter", (e) => {
+  e.preventDefault();
+  dragDepth += 1;
+  dropHintEl.classList.add("active");
+});
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("dragleave", (e) => {
+  e.preventDefault();
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) dropHintEl.classList.remove("active");
+});
+window.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  dropHintEl.classList.remove("active");
+  const file = e.dataTransfer?.files?.[0];
+  if (file) ingestFile(file);
+});
+
+void loadAndBuild();

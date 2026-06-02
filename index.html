@@ -73,45 +73,110 @@
         border-color: #7aa2ff;
         background: rgba(26, 38, 64, 0.9);
       }
+      #open-doc {
+        font-weight: 600;
+      }
       #search-count {
         color: #9bb0d6;
         font-size: 12px;
         min-width: 64px;
       }
+
+      /* Playback is a compact, faint floating chip so it never competes with the
+         animation; it lights up on hover/focus. */
       #playback {
         position: fixed;
-        bottom: 14px;
-        left: 14px;
+        bottom: 16px;
+        left: 16px;
         z-index: 10;
         display: flex;
-        gap: 8px;
         align-items: center;
+        gap: 8px;
+        padding: 5px 12px 5px 6px;
+        background: rgba(13, 20, 38, 0.55);
+        border: 1px solid rgba(51, 65, 92, 0.55);
+        border-radius: 999px;
+        box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+        backdrop-filter: blur(7px);
+        -webkit-backdrop-filter: blur(7px);
+        opacity: 0.5;
+        transition: opacity 0.25s ease;
+      }
+      #playback:hover,
+      #playback:focus-within {
+        opacity: 1;
       }
       #playback button {
         font: inherit;
         font-size: 13px;
+        line-height: 1;
         color: #cfe3ff;
-        background: rgba(13, 20, 38, 0.85);
-        border: 1px solid #33415c;
-        border-radius: 6px;
-        padding: 6px 12px;
+        background: transparent;
+        border: none;
+        border-radius: 50%;
+        width: 26px;
+        height: 26px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
         cursor: pointer;
         outline: none;
       }
       #playback button:hover {
-        border-color: #7aa2ff;
-        background: rgba(26, 38, 64, 0.9);
+        background: rgba(122, 162, 255, 0.18);
+      }
+      #build-bar {
+        width: 88px;
+        height: 4px;
+        border-radius: 2px;
+        background: rgba(122, 162, 255, 0.18);
+        overflow: hidden;
+      }
+      #build-bar-fill {
+        height: 100%;
+        width: 0%;
+        background: #7aa2ff;
+        border-radius: 2px;
+        transition: width 0.18s linear;
       }
       #build-progress {
         color: #9bb0d6;
-        font-size: 12px;
+        font-size: 11px;
+        white-space: nowrap;
+        min-width: 70px;
+      }
+
+      /* Full-window drop target hint, shown only while dragging a file over. */
+      #drop-hint {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(5, 7, 13, 0.72);
+        color: #cfe3ff;
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+        pointer-events: none;
+      }
+      #drop-hint.active {
+        display: flex;
+      }
+      #drop-hint .box {
+        padding: 40px 56px;
+        border: 2px dashed #7aa2ff;
+        border-radius: 16px;
+        background: rgba(13, 20, 38, 0.6);
       }
     </style>
   </head>
   <body>
     <div id="hud">
       <h1>human-document-tree</h1>
-      <div class="meta" id="stats">loading fixture…</div>
+      <div class="meta" id="stats">loading…</div>
     </div>
     <div id="controls">
       <input
@@ -122,13 +187,22 @@
         spellcheck="false"
       />
       <span id="search-count"></span>
+      <button id="open-doc" type="button">Open document</button>
       <button id="reset" type="button">Reset view</button>
     </div>
+    <input
+      id="file-input"
+      type="file"
+      accept=".txt,.md,.markdown,text/plain,text/markdown"
+      hidden
+    />
     <div id="playback">
-      <button id="playpause" type="button">Pause</button>
-      <button id="replay" type="button">Replay</button>
+      <button id="playpause" type="button" title="Play / Pause" aria-label="Play / Pause">⏸</button>
+      <button id="replay" type="button" title="Replay build" aria-label="Replay build">⟳</button>
+      <div id="build-bar"><div id="build-bar-fill"></div></div>
       <span id="build-progress"></span>
     </div>
+    <div id="drop-hint"><div class="box">Drop a .txt or .md document to visualize</div></div>
     <div id="graph"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
