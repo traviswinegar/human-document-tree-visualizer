@@ -106,44 +106,38 @@ native-free).
 
 ## Current Position
 
-**#20 — dual-pipeline benchmarking (LLM vs deterministic Tier-1), per-stage.**
-Stream A is **complete** end to end (doc → walker → ordered build steps →
-animated, interactive, replayable 3D graph; A1–A8). The semantic **B-stream
-backend is now complete (B1–B5)**: B3 (LLM grammar-constrained extraction merged
-onto the spine, `semantic_build_steps`), B4 (embedding similarity +
-`semantic_search`), and B5 (document-type detection runtime gate).
+**Deferred frontend wiring (B3/B4/B5) — the next *build-order* step.** Stream A is
+**complete** end to end (doc → walker → ordered build steps → animated,
+interactive, replayable 3D graph; A1–A8). The semantic **B-stream backend is
+complete (B1–B5)** and the **dual-pipeline benchmark (#20) just landed**, so the
+backend Rust work is done; what remains in the standing "finish the rest" mandate
+is wiring the frontend to the capability-aware backend it already has.
 
-**B5 just landed:** a deterministic, native-free document classifier in
-`doctree-core` (`classify_document` → `{class, confidence, signals}`) over four
-surface signals — word-weighted heading/list/code structure, dialogue, first/
-third-person pronoun density, past-tense density — that separates `Narrative` /
-`Expository` / `Structured` / `Unknown` and recommends a pipeline
-(`NarrativeHybrid` / `StructuralPlusSimilarity` / `StructuralOnly`). The Tauri
-layer adds `Capabilities`/`resolve_pipeline`/`Routing` and an always-registered
-`classify_document` command that **reconciles** that recommendation with the
-features the build actually compiled (`llm`, `vectordb`) and names the concrete
-command to call — degrading gracefully (hybrid → similarity → spine) and flagging
-the downgrade. Per **ADR-0005** the gate consults **no model** (surface features
-separate the corpus; an LLM confirmation for low-confidence cases is deferred),
-so unlike B2/B3/B4 the whole layer is verified headlessly with no `#[ignore]`d
-live test. The split mirrors ADR-0004: the class→ideal mapping is pure core
-logic; the capability reconciliation lives with the commands (only they know what
-was compiled).
+**#20 just landed:** the measuring tape for "does the expensive LLM path earn its
+keep." Pure, native-free `doctree-core::metrics` (`graph_metrics` →
+`{nodes, edges, valid, edge_density, node_kinds, edge_kinds, provenance}`;
+`PipelineRun::measured`; `compare_pipelines` → `{node_delta, edge_delta,
+latency_ratio}`) computes the per-stage comparison headlessly, and the
+`#[ignore]`d `--features llm` harness `src-tauri/tests/benchmark_roundtrip.rs`
+runs the real head-to-head — walk (tier1) vs prompt→extract→merge (hybrid) —
+timing each stage and printing the per-stage report. No ADR (a tool, not
+architecture); no Tauri command (a developer measurement, not a runtime feature —
+the metrics surface can back a UI benchmark later if wanted). The pure/gated split
+mirrors B3/B4/B5: comparison logic in core, the live model run desktop-only.
 
-**#20 is the next *build-order* step:** run a document through *both* extraction
-strategies — the deterministic "Tier-1" spine and the gated LLM path — and
-benchmark them at every stage (segmentation, entity/relationship extraction,
-final graph quality, latency), not just at the end. Raised by the user 2026-06-02
-(see Catch-all backlog). It needs the gated LLM path, which B1–B3 now provide;
-shape is a benchmark harness over shared fixtures emitting a per-stage comparison.
-
-> **Deferred frontend wiring (B3/B4/B5).** The semantic + classification backends
-> are complete and unit-tested, but the **frontend still calls the structural
-> build** path. One integration pass (after the B-stream + benchmarking settle)
-> should: classify on load via `classify_document`, dispatch to the resolved
-> build command, add a "find by meaning" search box (`semantic_search`), and
-> surface the document class / any capability downgrade in the UI. Flagged
-> desktop-only-untested (the Tauri window can't launch headlessly).
+**The next *build-order* step is the deferred frontend-integration pass.** The
+gated/classification backends (`classify_document`, `semantic_build_steps`,
+`embedded_build_steps`, `semantic_search`) are all registered and headlessly
+verified, but the **frontend still calls only the structural `build_steps`/wasm
+path**. One integration pass should: classify on load via `classify_document`,
+dispatch to the **resolved** build command it names, add a "find by meaning"
+search box (`semantic_search`) alongside the literal search, and surface the
+document class / any capability downgrade in the UI (with graceful fallback to the
+structural path when `llm_status` reports no engine). Frontend-only — the default
+build stays native-free. Flagged **desktop-only-untested**: the classify/dispatch
+*logic* is verifiable headlessly (the classifier is native-free) and the wasm
+fallback renders in the browser, but the live model/embedder runs are the user's
+desktop end test (the Tauri window can't launch headlessly).
 
 > **Stream C (C1) landed since this position was set.** The public web build now
 > walks documents in-browser via WASM (`doctree-core` → wasm32, same engine as
@@ -235,24 +229,28 @@ shape is a benchmark harness over shared fixtures emitting a per-stage compariso
   Commit `d95e1be` · tests `crates/doctree-core/src/classify.rs::tests::{classify_is_deterministic, narrative_prose_classifies_as_narrative, technical_prose_classifies_as_expository, heading_list_code_doc_classifies_as_structured, tiny_or_empty_doc_is_unknown, a_single_heading_does_not_make_prose_structured, signals_are_bounded_and_confidence_in_unit_range, dialogue_and_pronouns_are_measured}` (8) + `src-tauri/src/lib.rs::tests::{narrative_routing_degrades_with_capabilities, expository_routing_needs_only_the_embedder, structural_only_always_resolves_to_the_spine, resolved_commands_are_actually_registered, classify_routes_narrative_and_flags_downgrade_on_a_lean_build, classify_document_serializes_camel_case_with_snake_case_tags}` (6) — all default native-free, **no `#[ignore]`d live test** (the gate consults no model) · src `crates/doctree-core/src/classify.rs` (`classify_document`, `Classification`, `ClassificationSignals`, `DocumentClass`, `RecommendedPipeline`; word-weighted structure + dialogue + pronoun + past-tense signals → decision tree), `crates/doctree-core/src/lib.rs` (re-exports), `src-tauri/src/lib.rs` (`Capabilities`/`Capabilities::compiled`, `ResolvedPipeline`/`command`, pure `resolve_pipeline`, `Routing`, `classify_document_impl` + `classify_document` command + `generate_handler!` registration), ADR `docs/adr/ADR-0005-document-type-detection-runtime-gate.md`.
   Verified: default `cargo test --workspace` **86 green, native-free** (core 44 + integration 2 + llm 13 + tauri 21 + wasm 6; `cargo tree -p doctree-tauri` shows no `momusdev`/`llama`/`lancedb`/`fastembed`/`arrow`); both gated builds regression-clean under MSVC — `cargo check -p doctree-tauri --features llm` (2.95 s incremental) and `--features vectordb` (1m06s) compile with my crates warning-free (only pre-existing upstream `momusdev_llm` warnings). Per ADR-0005 the classifier is deterministic + native-free (so it's fully headlessly verified, unlike B2/B3/B4): the class→ideal-pipeline mapping is pure `doctree-core` logic; the capability reconciliation (`cfg!(feature=…)` → which registered command can actually run) lives in the command layer, degrading gracefully (hybrid → similarity → spine) and flagging the downgrade.
   Note: the gate adds one always-registered IPC command (`classify_document`) returning the verdict + the command to call; **wiring the frontend to call it** (classify on load → dispatch to the resolved build command → surface class/downgrade) is the deferred B3/B4/B5 frontend-integration pass. An optional LLM *confirmation* for low-confidence classifications is deferred (ADR-0005) — the surface features separate the fixtures cleanly without a model.
+- **#20** — dual-pipeline benchmark harness (deterministic Tier-1 vs gated LLM hybrid, per-stage). _No ADR — benchmarking is a tool, not load-bearing architecture._
+  Commit `c5742fa` · tests `crates/doctree-core/src/metrics.rs::tests::{metrics_count_kinds_and_provenance, metrics_are_deterministic, edge_density_is_edges_per_node_and_empty_is_zero, comparison_reports_deltas_and_latency_ratio, latency_ratio_floors_a_sub_millisecond_baseline, metrics_serialize_camel_case_with_snake_case_histogram_keys, comparison_serializes_camel_case}` (7, all default native-free) + ignored live harness `src-tauri/tests/benchmark_roundtrip.rs::benchmarks_tier1_against_hybrid_per_stage` (`--features llm`) · src `crates/doctree-core/src/metrics.rs` (`GraphMetrics`, `graph_metrics`, `PipelineRun`/`PipelineRun::measured`, `PipelineComparison`, `compare_pipelines`), `crates/doctree-core/src/lib.rs` (re-exports), `crates/doctree-core/src/schema.rs` (`PartialOrd`/`Ord` on `NodeKind`/`EdgeKind`/`Provenance` so the histograms key into a deterministic `BTreeMap`), `src-tauri/tests/benchmark_roundtrip.rs` (the gated live head-to-head).
+  Verified: default `cargo test --workspace` **93 green, native-free** (core 51 incl. 7 new `metrics` + integration 2 + llm 13 + tauri 21 + wasm 6; `cargo tree -p doctree-tauri` shows no `momusdev`/`llama`/`lancedb`/`fastembed`/`arrow`); gated `cargo test -p doctree-tauri --features llm --no-run` compiles clean under MSVC (17.5 s incremental, llama.cpp cached) and **builds the `benchmark_roundtrip` binary** — proving the harness compiles against the live `Engine`/`build_extraction_prompt`/`merge_semantic_onto_spine` APIs. The comparison machinery is pure `doctree-core` (`graph_metrics` → counts + per-kind/per-provenance `BTreeMap` histograms + validity + edges-per-node; `compare_pipelines` → node/edge deltas + a latency ratio whose baseline is floored at 1 ms so a sub-millisecond Tier-1 never divides by zero), serialized camelCase with snake_case enum histogram keys for the frontend.
+  Note: the **live head-to-head** (walk the spine → build the anchored prompt → grammar-constrained extraction on a real CPU model → merge → time each stage → per-stage report) is the user's desktop end test — run with `set DOCTREE_MODEL_PATH=…\qwen3-4b-q4km.gguf` then `cargo test -p doctree-tauri --features llm --test benchmark_roundtrip -- --ignored --nocapture`. No Tauri command was added: the benchmark is a developer measurement (exercised via the ignored harness), not a runtime feature — the metrics surface can back a UI benchmark in the deferred frontend pass if wanted. Embeddings (B4) are a possible third lane but kept out of #20's scope (the user named "LLM vs Tier-1").
 
 ---
 
 ## Catch-all backlog (off-topic discoveries — provenance noted, never fixed inline)
 
-- **Dual-pipeline benchmarking: run the full pipeline for BOTH the LLM path and
-  the deterministic "Tier 1" path, instrumented to compare them at every stage.**
-  _(raised by the user 2026-06-02 while A8 was finishing; to discuss in the
-  morning.)_ Intent: once the LLM wiring exists (B2+), we should be able to run a
-  document through both extraction strategies and benchmark them at each level of
-  the process (segmentation, entity/relationship extraction, final graph quality,
-  latency), not just at the end. The user noted "we should have built the full
-  pipeline for both" and wants to do this — but explicitly said **stop at the A8
-  request first and make sure everything works as intended**, so this is logged,
-  not started. Likely shape: a benchmark harness that drives `doctree-core` (Tier
-  1) and the gated `doctree-llm` path over the same fixtures and emits a
-  per-stage comparison. Sequencing TBD with the user (probably after B2/B3 give
-  us a working LLM path to compare against).
+- **✅ DONE (#20, commit `c5742fa`) — Dual-pipeline benchmarking: run the full
+  pipeline for BOTH the LLM path and the deterministic "Tier 1" path, instrumented
+  to compare them at every stage.** _(raised by the user 2026-06-02 while A8 was
+  finishing.)_ Intent: once the LLM wiring exists (B2+), run a document through
+  both extraction strategies and benchmark them at each level of the process
+  (segmentation, entity/relationship extraction, final graph quality, latency),
+  not just at the end. **Shipped as designed:** the comparison machinery is pure,
+  native-free `doctree-core::metrics` (`graph_metrics`, `PipelineRun`,
+  `compare_pipelines` → per-kind/per-provenance histograms + node/edge deltas +
+  latency ratio), and the live head-to-head over a real model is the `#[ignore]`d
+  `--features llm` harness `src-tauri/tests/benchmark_roundtrip.rs`
+  (`benchmarks_tier1_against_hybrid_per_stage`) that times each stage and prints a
+  per-stage report. See the #20 completed entry for the full triple.
 
 - **GPU acceleration blocked by bleeding-edge toolchain — needs user sign-off on a
   fix path.** _(discovered while building B1's gated native LLM layer.)_ The CPU
