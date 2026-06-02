@@ -26,6 +26,75 @@ pub fn graph_extraction_grammar() -> &'static str {
     doctree_core::GRAPH_GBNF
 }
 
+/// Soft cap on the anchored-document body inside an extraction prompt, in bytes.
+/// A single qwen3-4b context is ~4096 tokens (~16 KB); leaving headroom for the
+/// instruction preamble and the model's own output, ~8 KB of source keeps the
+/// whole exchange inside one window. Documents larger than this are truncated
+/// for now — proper chunked extraction is a follow-up (see BUILD_LOG backlog).
+pub const PROMPT_DOC_BUDGET_BYTES: usize = 8_192;
+
+/// Build the grammar-constrained extraction prompt for a document, given its
+/// deterministic spine [`doctree_core::Graph`] (B3).
+///
+/// The document is presented as its **anchored** form: each section/sentence
+/// node is rendered as `[<id>] <text>` in document order. This does double duty
+/// — it is the readable text *and* the map of stable spine ids the model can
+/// attach `mentions` edges to, so the semantic layer grounds onto the spine
+/// instead of floating free. Pure and native-free: prompt construction needs no
+/// model, so it is fully unit-testable without the `llm` feature.
+pub fn build_extraction_prompt(spine: &doctree_core::Graph) -> String {
+    use doctree_core::NodeKind;
+
+    // Anchorable nodes are the ones the walker gives real text + a span:
+    // sections (headings) and sentences. They tile the document in order.
+    let mut anchored: Vec<(usize, &str, &str)> = spine
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Section | NodeKind::Sentence))
+        .filter_map(|n| {
+            let text = n.text.as_deref()?;
+            let start = n.span.map(|s| s.start).unwrap_or(usize::MAX);
+            Some((start, n.id.as_str(), text))
+        })
+        .collect();
+    anchored.sort_by_key(|(start, _, _)| *start);
+
+    let mut body = String::new();
+    let mut truncated = false;
+    for (_, id, text) in &anchored {
+        // One line per anchor; collapse internal newlines so the [id] prefix
+        // stays meaningful and the model reads one unit per line.
+        let line_text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let line = format!("[{id}] {line_text}\n");
+        if body.len() + line.len() > PROMPT_DOC_BUDGET_BYTES {
+            truncated = true;
+            break;
+        }
+        body.push_str(&line);
+    }
+    if truncated {
+        body.push_str("[...document truncated...]\n");
+    }
+
+    let node_kinds = doctree_core::grammar::SEMANTIC_NODE_KINDS.join("|");
+    let edge_kinds = doctree_core::grammar::SEMANTIC_EDGE_KINDS.join("|");
+
+    format!(
+        "You are a precise literary-analysis engine. Read the DOCUMENT and extract its \
+semantic graph: the characters, places, concepts, events, objects, and groups in the \
+narrative, plus the relationships between them.\n\n\
+Output a single JSON object of the form {{\"nodes\": [...], \"edges\": [...]}}.\n\
+- node: {{\"id\": \"<kind>:<slug>\", \"kind\": \"<{node_kinds}>\", \"label\": \"<display name>\"}} \
+where <slug> is a short lowercase identifier (e.g. \"char:mara\", \"place:cove\", \"concept:betrayal\").\n\
+- edge: {{\"source\": \"<id>\", \"target\": \"<id>\", \"kind\": \"<{edge_kinds}>\"}}.\n\
+- Ground entities in the text: when a sentence introduces or refers to an entity, add a \
+\"mentions\" edge from that sentence's bracketed anchor id (e.g. \"sent:3\") to the entity id.\n\
+- Reuse the same entity id everywhere that entity appears; do not duplicate it.\n\
+- Extract only what the text supports — do not invent entities or relationships.\n\n\
+DOCUMENT (each line is prefixed with its anchor id):\n{body}"
+    )
+}
+
 /// Configuration for loading a local GGUF model.
 ///
 /// Native-free: this struct and its builders exist regardless of the `llm`
@@ -224,6 +293,75 @@ mod tests {
         if std::env::var(MODEL_PATH_ENV).is_err() {
             assert!(c.resolve_model_path().is_err());
         }
+    }
+
+    #[test]
+    fn extraction_prompt_anchors_spine_and_lists_kinds() {
+        use doctree_core::{Graph, Node, NodeKind, Span};
+        let mut spine = Graph::new();
+        spine.push_node(
+            Node::structural("sec:1", NodeKind::Section, "Chapter One")
+                .with_text("Chapter One")
+                .with_span(Span::new(0, 11)),
+        );
+        // Deliberately out of document order to prove the prompt sorts by span.
+        spine.push_node(
+            Node::structural("sent:2", NodeKind::Sentence, "Vane arrived.")
+                .with_text("Vane arrived.")
+                .with_span(Span::new(30, 43)),
+        );
+        spine.push_node(
+            Node::structural("sent:1", NodeKind::Sentence, "Mara found a letter.")
+                .with_text("Mara found a letter.")
+                .with_span(Span::new(12, 32)),
+        );
+        // A term has no text/span ⇒ must NOT appear as an anchor line.
+        spine.push_node(Node::structural("term:letter", NodeKind::Term, "letter"));
+
+        let p = build_extraction_prompt(&spine);
+
+        // Anchors present, and in document (span) order: sec:1 < sent:1 < sent:2.
+        let i_sec = p.find("[sec:1]").expect("sec anchor");
+        let i_s1 = p.find("[sent:1]").expect("sent:1 anchor");
+        let i_s2 = p.find("[sent:2]").expect("sent:2 anchor");
+        assert!(i_sec < i_s1 && i_s1 < i_s2, "anchors must be in span order");
+        // Anchored text travels with its id.
+        assert!(p.contains("[sent:1] Mara found a letter."));
+        // Non-anchorable nodes are excluded.
+        assert!(!p.contains("term:letter"));
+        // Every grammar kind the model may emit is named in the instructions.
+        for k in doctree_core::grammar::SEMANTIC_NODE_KINDS {
+            assert!(p.contains(k), "prompt should list node kind {k}");
+        }
+        for k in doctree_core::grammar::SEMANTIC_EDGE_KINDS {
+            assert!(p.contains(k), "prompt should list edge kind {k}");
+        }
+        // It must steer toward grounding via mentions edges.
+        assert!(p.contains("mentions"));
+    }
+
+    #[test]
+    fn extraction_prompt_respects_the_doc_budget() {
+        use doctree_core::{Graph, Node, NodeKind, Span};
+        let mut spine = Graph::new();
+        // Many long sentences, well past the byte budget.
+        for i in 0..2000 {
+            let text = format!("Sentence number {i} carries a fair amount of filler text.");
+            let start = i * 60;
+            spine.push_node(
+                Node::structural(format!("sent:{i}"), NodeKind::Sentence, text.clone())
+                    .with_text(text)
+                    .with_span(Span::new(start, start + 58)),
+            );
+        }
+        let p = build_extraction_prompt(&spine);
+        assert!(p.contains("[...document truncated...]"), "must mark truncation");
+        // The preamble is small; total prompt stays near the doc budget + slack.
+        assert!(
+            p.len() < PROMPT_DOC_BUDGET_BYTES + 2_000,
+            "prompt should be bounded by the budget, got {} bytes",
+            p.len()
+        );
     }
 
     #[test]

@@ -58,3 +58,51 @@ fn grammar_constrained_output_is_schema_shaped_json() {
     );
     eprintln!("graph → {}  ({} ms)", out.text, out.inference_ms);
 }
+
+/// The full B3 hybrid build: walk a document into its spine, build the anchored
+/// extraction prompt, run the grammar-constrained model, merge the fragment onto
+/// the spine, and confirm the result is a valid graph with semantic content that
+/// orders into a build stream. This is the end-to-end shape `semantic_build_steps`
+/// runs at runtime, exercised here without the Tauri window.
+#[test]
+#[ignore = "loads a multi-GB GGUF model; run with --features llm -- --ignored"]
+fn hybrid_extraction_merges_onto_the_spine() {
+    use doctree_core::build_sequence;
+    use doctree_llm::build_extraction_prompt;
+    use doctree_tauri_lib::{llm::merge_semantic_onto_spine, walk_document_impl};
+
+    let doc = "# The Cove\n\nMara met the inspector Vane at the cove. \
+               They argued about the missing ship. The storm had taken it.";
+    let spine = walk_document_impl(doc, None);
+    let spine_nodes = spine.nodes.len();
+
+    let prompt = build_extraction_prompt(&spine);
+    let engine =
+        doctree_llm::Engine::load(&doctree_llm::LlmConfig::from_env()).expect("load model");
+    let json = engine
+        .extract_graph_json(&prompt)
+        .expect("grammar-constrained extraction")
+        .text;
+    let fragment: doctree_core::Graph =
+        serde_json::from_str(&json).unwrap_or_else(|e| panic!("not schema JSON: {e}\n{json}"));
+
+    let merged = merge_semantic_onto_spine(spine, fragment);
+    assert!(merged.is_valid(), "hybrid graph must be valid by construction");
+    assert!(
+        merged.nodes.len() >= spine_nodes,
+        "merge never drops spine nodes"
+    );
+    assert!(
+        merged.nodes.iter().any(|n| n.kind.is_semantic()),
+        "expected at least one LLM semantic node, got: {json}"
+    );
+    let steps = build_sequence(&merged);
+    assert!(!steps.is_empty());
+    eprintln!(
+        "hybrid → {} nodes / {} edges / {} steps (spine had {})",
+        merged.nodes.len(),
+        merged.edges.len(),
+        steps.len(),
+        spine_nodes
+    );
+}

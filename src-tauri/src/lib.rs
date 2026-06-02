@@ -17,9 +17,11 @@
 use doctree_core::{build_sequence, walk_with, BuildStep, Graph, WalkOptions};
 use serde::{Deserialize, Serialize};
 
-/// The gated local-LLM command layer (B2). Always present in the source; the
-/// native engine inside it is compiled only under the `llm` feature.
-mod llm;
+/// The gated local-LLM command layer (B2/B3). Always present in the source; the
+/// native engine inside it is compiled only under the `llm` feature. Public so
+/// the pure pieces (e.g. `merge_semantic_onto_spine`) are reachable from the
+/// crate's integration tests.
+pub mod llm;
 
 /// Frontend-supplied walk tunables. Mirrors [`WalkOptions`]; every field is
 /// optional so the frontend can send `{}` (or omit the argument) and get the
@@ -85,7 +87,8 @@ pub fn run() {
             walk_document,
             build_steps,
             llm::llm_status,
-            llm::llm_complete
+            llm::llm_complete,
+            llm::semantic_build_steps
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -323,6 +323,22 @@ impl Graph {
         }
         self.edges.extend(other.edges);
     }
+
+    /// Drop every edge whose `source` or `target` does not name an existing
+    /// node, returning how many were removed. This is the post-merge safety net
+    /// for the semantic layer (B3): the GBNF grammar lets the LLM emit edges to
+    /// *any* string id, so a model can reference an entity it never declared (or
+    /// a spine id that isn't in the fragment). Pruning after [`merge`] keeps the
+    /// combined graph referentially valid by construction, so the build stream
+    /// and the renderer never see a half-wired edge.
+    pub fn prune_dangling_edges(&mut self) -> usize {
+        use std::collections::HashSet;
+        let ids: HashSet<&str> = self.nodes.iter().map(|n| n.id.as_str()).collect();
+        let before = self.edges.len();
+        self.edges
+            .retain(|e| ids.contains(e.source.as_str()) && ids.contains(e.target.as_str()));
+        before - self.edges.len()
+    }
 }
 
 #[cfg(test)]
@@ -458,5 +474,49 @@ mod tests {
         assert_eq!(liz.kind, NodeKind::Term, "existing spine node wins");
         assert_eq!(spine.edges.len(), 1);
         assert!(spine.is_valid());
+    }
+
+    #[test]
+    fn prune_dangling_edges_drops_only_unwired_edges() {
+        // Simulates a merged graph after the LLM layer: a spine sentence, two
+        // semantic entities, and three edges — one valid spine→entity mention,
+        // one valid entity↔entity, and one pointing at an entity that was never
+        // declared (a hallucinated id the grammar happily allowed).
+        let mut g = Graph::new();
+        g.push_node(Node::structural("sent:1", NodeKind::Sentence, "Mara met Vane."));
+        g.push_node(Node::semantic("char:mara", NodeKind::Character, "Mara"));
+        g.push_node(Node::semantic("char:vane", NodeKind::Character, "Vane"));
+        g.push_edge(Edge::new("sent:1", "char:mara", EdgeKind::Mentions, Provenance::Semantic));
+        g.push_edge(Edge::new(
+            "char:mara",
+            "char:vane",
+            EdgeKind::InteractsWith,
+            Provenance::Semantic,
+        ));
+        g.push_edge(Edge::new(
+            "char:mara",
+            "char:ghost", // never declared
+            EdgeKind::InteractsWith,
+            Provenance::Semantic,
+        ));
+        assert!(!g.is_valid(), "the ghost edge makes it invalid pre-prune");
+
+        let removed = g.prune_dangling_edges();
+        assert_eq!(removed, 1, "exactly the ghost edge is dropped");
+        assert_eq!(g.edges.len(), 2);
+        assert!(g.is_valid(), "valid by construction after pruning");
+        // The two good edges survive in order.
+        assert_eq!(g.edges[0].target, "char:mara");
+        assert_eq!(g.edges[1].target, "char:vane");
+    }
+
+    #[test]
+    fn prune_is_a_noop_on_a_valid_graph() {
+        let mut g = Graph::new();
+        g.push_node(Node::semantic("a", NodeKind::Concept, "A"));
+        g.push_node(Node::semantic("b", NodeKind::Concept, "B"));
+        g.push_edge(Edge::new("a", "b", EdgeKind::RelatesTo, Provenance::Semantic));
+        assert_eq!(g.prune_dangling_edges(), 0);
+        assert_eq!(g.edges.len(), 1);
     }
 }
