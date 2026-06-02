@@ -11,7 +11,6 @@ import {
   loadBuildSource,
   searchByMeaning,
   defaultDocument,
-  isTauri,
   type BuildSource,
   type ResolvedPipeline,
 } from "./doc-source";
@@ -66,6 +65,9 @@ const buildBarFillEl = document.getElementById("build-bar-fill")!;
 const openDocEl = document.getElementById("open-doc") as HTMLButtonElement;
 const saveDocEl = document.getElementById("save-doc") as HTMLButtonElement;
 const libraryEl = document.getElementById("library") as HTMLButtonElement;
+const exportDocEl = document.getElementById("export-doc") as HTMLButtonElement;
+const importDocEl = document.getElementById("import-doc") as HTMLButtonElement;
+const importInputEl = document.getElementById("import-input") as HTMLInputElement;
 const libraryModalEl = document.getElementById("library-modal")!;
 const libraryBackdropEl = document.getElementById("library-backdrop")!;
 const libraryListEl = document.getElementById("library-list")!;
@@ -1479,16 +1481,23 @@ function buildSavedDoc(name: string): SavedDoc {
   return doc;
 }
 
-// Brief, transient feedback on the Save button (it returns to "Save" after a beat).
-let saveFlashTimer: number | null = null;
-function flashSave(msg: string): void {
-  saveDocEl.textContent = msg;
-  if (saveFlashTimer !== null) window.clearTimeout(saveFlashTimer);
-  saveFlashTimer = window.setTimeout(() => {
-    saveDocEl.textContent = "Save";
-    saveFlashTimer = null;
-  }, 1500);
+// Brief, transient feedback on a button: swap its label to `msg`, then restore the
+// resting label after a beat. Per-button timers so Save/Export/Import don't stomp
+// each other's flash. Used by Save, Export, and Import.
+const flashTimers = new WeakMap<HTMLElement, number>();
+function flashButton(el: HTMLElement, msg: string, restore: string): void {
+  el.textContent = msg;
+  const prev = flashTimers.get(el);
+  if (prev !== undefined) window.clearTimeout(prev);
+  flashTimers.set(
+    el,
+    window.setTimeout(() => {
+      el.textContent = restore;
+      flashTimers.delete(el);
+    }, 1500)
+  );
 }
+const flashSave = (msg: string): void => flashButton(saveDocEl, msg, "Save");
 
 // Save the current graph. First save prompts for a name (seeded from the opened
 // file); a re-save (id already tracked) updates in place silently.
@@ -1517,6 +1526,79 @@ async function doSave(): Promise<void> {
     flashSave("save failed");
   } finally {
     saveDocEl.disabled = false;
+  }
+}
+
+// Phase 6 #2 — slugify a name into a filesystem-friendly download stem.
+function slugifyName(name: string): string {
+  return (
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60) || "graph"
+  );
+}
+
+// Export the on-screen graph as a portable `*.doctree.json` (the opaque SavedDoc
+// shape, ADR-0007). The downloaded file moves a graph between backends/machines;
+// the internal `id` is stripped so importing it always lands as a fresh library
+// entry rather than clobbering an unrelated saved graph that happens to share it.
+function doExport(): void {
+  if (graph.graphData().nodes.length === 0) {
+    flashButton(exportDocEl, "nothing yet", "Export");
+    return;
+  }
+  const name =
+    currentDocName || currentDocLabel?.replace(/\.[^.]+$/, "") || "Untitled document";
+  const doc = buildSavedDoc(name);
+  delete doc.id; // portable file: receiver mints its own id on import
+  const blob = new Blob([JSON.stringify(doc, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${slugifyName(name)}.doctree.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  flashButton(exportDocEl, "exported ✓", "Export");
+}
+
+// Import a previously exported `*.doctree.json`: read → parse → validate the
+// SavedDoc shape (schemaVersion + node/edge arrays + text), then restore it into
+// the scene (instant, no re-walk) and persist it into this machine's library so
+// it sticks. A malformed or wrong-schema file flashes "bad file" and is ignored.
+async function doImport(file: File): Promise<void> {
+  try {
+    const obj = JSON.parse(await file.text()) as Record<string, unknown>;
+    if (
+      !obj ||
+      typeof obj !== "object" ||
+      obj.schemaVersion !== 1 ||
+      !Array.isArray(obj.nodes) ||
+      !Array.isArray(obj.edges) ||
+      typeof obj.text !== "string"
+    ) {
+      flashButton(importDocEl, "bad file", "Import");
+      return;
+    }
+    const doc = obj as unknown as SavedDoc;
+    delete doc.id; // imported graph is new to this library → mint a fresh id
+    const now = new Date().toISOString();
+    if (!doc.name) doc.name = file.name.replace(/\.doctree\.json$|\.json$/i, "") || "Imported graph";
+    if (!doc.createdAt) doc.createdAt = now;
+    if (!doc.updatedAt) doc.updatedAt = now;
+    if (!doc.origin) doc.origin = "import";
+    restoreSavedDoc(doc);
+    // Persist the restored graph (currentDocId is null after restore → new entry).
+    const meta = await saveDoc(buildSavedDoc(doc.name));
+    currentDocId = meta.id;
+    currentDocName = meta.name;
+    flashButton(importDocEl, "imported ✓", "Import");
+  } catch (err) {
+    console.error("import failed:", err);
+    flashButton(importDocEl, "bad file", "Import");
   }
 }
 
@@ -1784,29 +1866,36 @@ async function deleteSaved(id: string): Promise<void> {
   }
 }
 
-// Desktop-only: reveal Save/Library and wire them. The browser build skips this,
-// so the buttons stay hidden and the IPC functions are never called there.
-if (isTauri()) {
-  saveDocEl.classList.remove("hidden");
-  libraryEl.classList.remove("hidden");
-  saveDocEl.addEventListener("click", () => void doSave());
-  libraryEl.addEventListener("click", () => openLibrary());
-  libraryCloseEl.addEventListener("click", () => closeLibrary());
-  libraryBackdropEl.addEventListener("click", () => closeLibrary());
-  libraryListEl.addEventListener("click", (e) => {
-    const btn = (e.target as HTMLElement).closest("[data-action]");
-    if (!btn) return;
-    const action = btn.getAttribute("data-action");
-    const id = btn.getAttribute("data-id");
-    if (!id) return;
-    if (action === "open") void openSaved(id);
-    else if (action === "rename") void renameSaved(id);
-    else if (action === "delete") void deleteSaved(id);
-  });
-  window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !libraryModalEl.classList.contains("hidden")) closeLibrary();
-  });
-}
+// Phase 6 #2 — Save / Library / Export / Import are wired on BOTH paths now. The
+// desktop persists through the Tauri commands; the browser persists through an
+// IndexedDB store in the page's origin (see library.ts, picked by isTauri()).
+// Export downloads the portable *.doctree.json; Import reads one back, validates
+// it, restores it, and saves it into this machine's library. The buttons are
+// always visible (no longer desktop-gated in index.html).
+saveDocEl.addEventListener("click", () => void doSave());
+libraryEl.addEventListener("click", () => openLibrary());
+exportDocEl.addEventListener("click", () => doExport());
+importDocEl.addEventListener("click", () => importInputEl.click());
+importInputEl.addEventListener("change", () => {
+  const file = importInputEl.files?.[0];
+  if (file) void doImport(file);
+  importInputEl.value = ""; // let the same file be re-imported
+});
+libraryCloseEl.addEventListener("click", () => closeLibrary());
+libraryBackdropEl.addEventListener("click", () => closeLibrary());
+libraryListEl.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest("[data-action]");
+  if (!btn) return;
+  const action = btn.getAttribute("data-action");
+  const id = btn.getAttribute("data-id");
+  if (!id) return;
+  if (action === "open") void openSaved(id);
+  else if (action === "rename") void renameSaved(id);
+  else if (action === "delete") void deleteSaved(id);
+});
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !libraryModalEl.classList.contains("hidden")) closeLibrary();
+});
 
 // Chip controls are wired once; they act on whatever the current `player` is.
 playPauseEl.addEventListener("click", () => {

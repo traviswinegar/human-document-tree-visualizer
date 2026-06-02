@@ -833,8 +833,10 @@
         spellcheck="false"
       />
       <span id="meaning-count" class="hidden"></span>
-      <button id="save-doc" type="button" class="hidden" title="Save this graph to the library">Save</button>
-      <button id="library" type="button" class="hidden" title="Open the saved-graph library">Library</button>
+      <button id="save-doc" type="button" title="Save this graph to the library">Save</button>
+      <button id="library" type="button" title="Open the saved-graph library">Library</button>
+      <button id="export-doc" type="button" title="Download this graph as a portable .doctree.json">Export</button>
+      <button id="import-doc" type="button" title="Import a .doctree.json graph file">Import</button>
       <button id="open-doc" type="button">Open document</button>
       <button id="reset" type="button">Reset view</button>
     </div>
@@ -842,6 +844,12 @@
       id="file-input"
       type="file"
       accept=".txt,.md,.markdown,.pdf,text/plain,text/markdown,application/pdf"
+      hidden
+    />
+    <input
+      id="import-input"
+      type="file"
+      accept=".json,.doctree.json,application/json"
       hidden
     />
     <div id="playback">
@@ -860,10 +868,10 @@
       />
     </div>
     <div id="drop-hint"><div class="box">Drop a .txt, .md, or .pdf document to visualize</div></div>
-    <!-- Phase 5 #4 (ADR-0007): the saved-graph library. Desktop-only (revealed
-         when running in the Tauri shell); lists persisted graphs with open /
-         rename / delete. Opening one restores the exact saved layout instantly,
-         with no re-walk. -->
+    <!-- Phase 5 #4 (ADR-0007) + Phase 6 #2: the saved-graph library. Available on
+         BOTH paths now — desktop persists via Tauri, the browser via IndexedDB in
+         the page origin. Lists persisted graphs with open / rename / delete;
+         opening one restores the exact saved layout instantly, with no re-walk. -->
     <div id="library-modal" class="hidden">
       <div class="lib-backdrop" id="library-backdrop"></div>
       <div class="lib-panel" role="dialog" aria-label="Saved graphs">
