@@ -1,0 +1,46 @@
+# --- Rust / Cargo (backend, incl. Tauri's src-tauri) ---
+/target/
+**/target/
+src-tauri/target/
+**/*.rs.bk
+*.pdb
+
+# --- Node / web frontend ---
+node_modules/
+dist/
+dist-ssr/
+.vite/
+build/
+*.local
+
+# --- Tauri build output ---
+src-tauri/gen/
+src-tauri/WixTools/
+
+# --- Local LLM model files (loaded from disk at runtime, never committed) ---
+*.gguf
+*.bin
+*.safetensors
+/models/
+
+# --- Vector store / RAG artifacts (LanceDB) ---
+*.lance
+/data/
+*.db
+
+# --- Secrets / local env ---
+.env
+.env.*
+!.env.example
+
+# --- Logs / scratch ---
+*.log
+*.tmp
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
