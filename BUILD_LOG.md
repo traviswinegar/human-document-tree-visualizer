@@ -165,9 +165,10 @@ end test: the **visible** semantic-node render + live classify/meaning-search
 round-trip (the Tauri webview can't be introspected like the browser preview MCP).
 See the #33 entry for the full triple.
 
-**Walk-UX pass since the desktop switch (#35, #37, #39, #41 — all frontend-only,
-native-free, ADR-free polish on the live walk):** the user is iterating on the
-desktop experience by eye. **#35** retuned palette / bloom / force-spread.
+**Walk-UX pass since the desktop switch (#35, #37, #39, #41, #43 — all
+frontend-only, native-free, ADR-free polish on the live walk):** the user is
+iterating on the desktop experience by eye. **#35** retuned palette / bloom /
+force-spread.
 **#37** fixed the grammar-constrained extraction that had silently emitted **0
 bytes** — the semantic overlay had *never* rendered until then — now verified live
 (`output_bytes` 0→548, ~28 s). **#39** (commit `013dc2a`) attacks the user's
@@ -184,8 +185,20 @@ walk gives each sentence its own level), so they're **replaced** by layouts that
 fit the topology — adaptive Force · 3D (charge/range/edge-length now scale with
 node count), Force · 2D map, and a structural **Layers** mode that pins each node's
 height by `part_of` containment depth and lets the force field spread each band.
-See the #39 / #41 entries for the full triples. The next perceptual confirmation
-(do the new modes look good on the big doc) is the user's desktop run.
+**#43** (commit `67cdd33`) then answers the user's follow-up — after judging #41's
+layouts "ok right now" and asking how to *read* the Layers graph, they asked for
+"some statistical analysis of the structure in a panel on the left." It adds a
+docked, collapsible left panel (mirroring the right document sidebar) that
+analyzes the on-screen graph: node-kind composition with proportional bars,
+edge-kind connections + a provenance split (deterministic spine vs LLM-semantic
+vs embedding), shape ratios (words, words/sentence, clauses/sentence,
+sentences/paragraph, edges/node), and degree-ranked clickable key terms — all
+computed purely in TS so it stays native-free across the desktop, browser-WASM,
+and fixture paths and updates live as the build streams. The floating `#hud`
+(title + stats/routing/semantic-status) moved into the panel, so the 3D canvas is
+now the middle column between the two docked panels. See the #39 / #41 / #43
+entries for the full triples. The next perceptual confirmation (do the layouts +
+the new panel look good on the big doc) is the user's desktop run.
 
 **Remaining deferred / blocked items (need a user decision — do NOT start
 autonomously):**
@@ -321,6 +334,10 @@ autonomously):**
   Commit `11135e1` · test `npx tsc --noEmit` (exit 0) + `npm run build` (exit 0 — 397 modules, `dist/` emitted; only the pre-existing >500 kB advisory) — the standing frontend gate (no JS test runner has ever existed; every A5–D4 / #29–#39 frontend phase verified this same way) · src `src/main.ts` (new `spread(n)` + `applyForceTuning(n)` scale charge `-90→-270`, `distanceMax` `600→1700`, link distance `40→95` with node count, replacing the fixed `CHARGE_STRENGTH`/`LINK_DISTANCE` constants; `LayoutMode` reworked to `force3d`/`force2d`/`layers`; `KIND_LAYER` + `layerGap(n)` + `pinLayers`/`unpinLayers` implement the structural "Layers" mode by pinning `node.fy` per containment depth; `applyLayout` toggles `numDimensions(2|3)` and pin/unpin; `applyForceTuning` re-called from `startBuild` and after the semantic delta grows the graph; `commit` re-pins layers each streamed batch; stale `onDagError` comment corrected), `index.html` (`#layout` options → Force · 3D / Force · 2D map / Layers · by structure).
   Root cause (the broken DAG modes): the document graph isn't a tree. The walker (`walker.rs:115-118`) emits one `precedes` edge per sentence-to-next-sentence, chaining all ~1000 sentences into a single linear run; 3d-force-graph's built-in DAG depth walk consumes **every** link, so each sentence lands on its own successive depth level → a ~1000-level-deep, one-node-wide column (the "thin line"), with the `co_occurs_with` (`walker.rs:612-623`) + similarity edges adding cycles `onDagError` then skips. `dagLevelDistance`/charge tuning cannot unbend a linear chain, so the three DAG modes were structurally doomed. The fix abandons the library's all-links DAG and instead drives a hierarchy from `part_of` *alone* via the kind→layer map (`section▸paragraph▸sentence▸clause/quote/ref▸term▸entity`), pinning `fy` so the force field only spreads each band in x/z — immune to both the precedes chain and the cycles. The "Force lacks a lot" half is the adaptive tuning: the old constants were sized for the ~40-node fixture and left ~1800 nodes a cramped knot; `spread(n)` ramps repulsion/range/edge-length so a large graph opens up while the fixture keeps its look.
   Verified: `npx tsc --noEmit` exit 0 (confirmed `NodeObject.fy?: number` accepts the pin + `undefined` release); `npm run build` exit 0. Frontend-only; default build stays **native-free** (pure TS — no new deps). The perceptual judgement (do the three modes now *look good* on the 100k-word doc) is the user's desktop end test — the Tauri webview isn't screenshot/MCP-introspectable (the documented A5–D4 tooling limit).
+- **#43** — left statistics panel: a docked, collapsible structural analysis of the document on the left, mirroring the right document sidebar. _No ADR — frontend UI on an already-decided render path (cf. #30/#35/#39/#41, also ADR-free); no new load-bearing choice, no new deps._ User (after judging #41's layouts "ok right now" and asking how to read the Layers graph): "Probably we need some statistical analysis of the structure in a panel on the left."
+  Commit `67cdd33` · test `npx tsc --noEmit` (exit 0) + `npm run build` (exit 0 — 397 modules, `dist/` emitted; only the pre-existing >500 kB advisory) — the standing frontend gate (no JS test runner has ever existed; every A5–D4 / #29–#41 frontend phase verified this same way) · src `src/main.ts` (new `renderStats(nodes, edges)` computes node-kind composition, edge-kind connections + an edge-provenance split, shape ratios `words`/`words-per-sentence`/`clauses-per-sentence`/`sentences-per-paragraph`/`edges-per-node`, and degree-ranked key terms — all from the on-screen arrays via the existing `idOf`, walked in fixed `NODE_KIND_ORDER`/`EDGE_KIND_ORDER`/`PROV_ORDER` so rows don't reshuffle as the spine streams; called from `commit` alongside `renderSidebar`; reset to "analyzing…" in `startBuild`; `EdgeKind` added to the type import; new `statsBodyEl`/`statsCollapseEl`/`statsReopenEl`/`playbackEl` refs; `layoutGraph` reworked so the canvas is the *middle* column — subtracts both `LEFT_W=300` and `SIDEBAR_W=360`, sets `container.style.left`, and shifts `playbackEl.style.left`; new `setStats(open)` mirrors `setSidebar`; key-term chips delegate clicks to `selectNodeById`), `index.html` (the floating `#hud` becomes a docked `<aside id="stats-panel">` with `#stats-header` [title + `#stats-collapse`], `#stats-meta` [the unchanged `#stats`/`#routing`/`#semantic-status` ids], and a scrollable `#stats-body`; `#stats-reopen` tab; `#graph` → `position:absolute` with a `left` transition; playback gains a `left` transition; panel + stat-row/metric/prov/term-chip CSS mirroring the sidebar).
+  Root cause (why a panel, not a tweak): #41 made the *layout* legible but the graph still answered no quantitative questions — how much of this 1800-node graph is sentences vs terms, how much of the edge mass is the deterministic spine vs the inferred semantic overlay, how dense is it, which terms are the hubs. The metrics are deliberately computed frontend-side (not via the native `doctree-core::metrics` `graph_metrics`) so they render on every path including the browser-WASM and fixture builds where no Tauri command exists, and so they update live as the build streams rather than only at the end. Vocabulary mirrors `metrics.rs` (counts by node kind / edge kind / provenance; `edges/node` is that module's `edge_density`).
+  Verified: `npx tsc --noEmit` exit 0; `npm run build` exit 0 (397 modules, `dist/` emitted; only the pre-existing >500 kB chunk advisory, unrelated). Frontend-only; default build stays **native-free** (pure TS — no new deps). The perceptual confirmation (does the panel read well and the numbers look right on the 100k-word doc) is the user's desktop end test — the Tauri webview isn't screenshot/MCP-introspectable (the documented A5–D4 tooling limit).
 
 ---
 
