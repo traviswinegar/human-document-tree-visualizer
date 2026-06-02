@@ -104,12 +104,69 @@ impl Classification {
             }
         }
     }
+
+    /// Would an LLM *confirmation* of this verdict be worthwhile? (The deferred
+    /// ADR-0005 step, finally wired under the `llm` feature in Phase 6 #6.)
+    ///
+    /// Only the **prose boundary** is worth a model's opinion: `Narrative` vs
+    /// `Expository` is the genuinely fuzzy call the surface features can land on
+    /// the wrong side of when the signals are weak. The other verdicts are *not*
+    /// asked of a model:
+    /// * `Structured` is decided by `structure_ratio` — a high-precision, purely
+    ///   structural fact a language model can't improve on.
+    /// * `Unknown` means there isn't enough text to judge; a model can't conjure
+    ///   signal that isn't there.
+    ///
+    /// So this is true exactly when the class is `Narrative`/`Expository` *and*
+    /// the confidence sits below [`CONFIRM_BELOW_CONFIDENCE`] (the ambiguous
+    /// band around the 0.5 narrative-score boundary). Pure; native-free — the
+    /// gate decides *whether* to consult a model without consulting one.
+    pub fn warrants_confirmation(&self) -> bool {
+        matches!(
+            self.class,
+            DocumentClass::Narrative | DocumentClass::Expository
+        ) && self.confidence < CONFIRM_BELOW_CONFIDENCE
+    }
+
+    /// Fold a model's confirmation verdict back into this classification. The
+    /// model is authoritative for the **class** (that's what we asked it to
+    /// adjudicate), but the measured [`ClassificationSignals`] are facts and are
+    /// kept untouched; only `class` and `confidence` change:
+    /// * **Model agrees** with the deterministic class → two independent methods
+    ///   concur, so confidence is raised (blended toward 1, never below the prior
+    ///   value): `0.5 * (1 + prior)`.
+    /// * **Model overrides** the deterministic class → adopt the model's class at
+    ///   a moderate [`CONFIRMED_FLOOR`] "model-decided" confidence.
+    ///
+    /// Pure and total; native-free (the *caller* runs the model, this just
+    /// reconciles the answer).
+    pub fn with_confirmed_class(self, confirmed: DocumentClass) -> Classification {
+        let confidence = if confirmed == self.class {
+            clamp01(0.5 * (1.0 + self.confidence))
+        } else {
+            CONFIRMED_FLOOR
+        };
+        Classification {
+            class: confirmed,
+            confidence,
+            signals: self.signals,
+        }
+    }
 }
 
 // --- thresholds (named for testability; tuned for short fixtures + real docs) --
 
 /// Below this many words there isn't enough signal to classify.
 const MIN_WORDS: usize = 12;
+/// A `Narrative`/`Expository` verdict below this confidence sits in the ambiguous
+/// band near the narrative-score boundary, where an optional LLM confirmation is
+/// worthwhile (see [`Classification::warrants_confirmation`]). Public so the
+/// command layer and tests share the one definition.
+pub const CONFIRM_BELOW_CONFIDENCE: f32 = 0.65;
+/// The confidence assigned when a model **overrides** the deterministic class:
+/// moderate — the model is now the authority, but a single confirmation isn't
+/// certainty (see [`Classification::with_confirmed_class`]).
+pub const CONFIRMED_FLOOR: f32 = 0.7;
 /// At/above this share of structural lines the document is reference material.
 const STRUCTURE_DOMINATES: f32 = 0.5;
 /// Narrative score at/above this is classified [`DocumentClass::Narrative`].
@@ -414,5 +471,81 @@ mod tests {
         assert!(s.dialogue_ratio > 0.0, "narrative has a quoted line");
         assert!(s.pronoun_ratio > 0.0, "she/he/they present");
         assert!(s.past_tense_ratio > 0.0, "found/had/watched present");
+    }
+
+    // --- #6: optional LLM confirmation of low-confidence prose verdicts --------
+
+    /// Build a synthetic verdict with a given class + confidence (signals are
+    /// irrelevant to the confirmation logic, so they're zeroed).
+    fn verdict(class: DocumentClass, confidence: f32) -> Classification {
+        Classification {
+            class,
+            confidence,
+            signals: ClassificationSignals {
+                word_count: 100,
+                structure_ratio: 0.0,
+                dialogue_ratio: 0.0,
+                pronoun_ratio: 0.0,
+                past_tense_ratio: 0.0,
+            },
+        }
+    }
+
+    #[test]
+    fn only_low_confidence_prose_warrants_confirmation() {
+        // Ambiguous prose (either side of the boundary, below the threshold) → yes.
+        assert!(verdict(DocumentClass::Narrative, 0.55).warrants_confirmation());
+        assert!(verdict(DocumentClass::Expository, 0.6).warrants_confirmation());
+        // Confident prose → no need to ask a model.
+        assert!(!verdict(DocumentClass::Narrative, 0.85).warrants_confirmation());
+        assert!(!verdict(DocumentClass::Expository, 0.9).warrants_confirmation());
+        // Structured / Unknown are never confirmation candidates, even when the
+        // confidence is low (structure is a fact; unknown lacks text).
+        assert!(!verdict(DocumentClass::Structured, 0.4).warrants_confirmation());
+        assert!(!verdict(DocumentClass::Unknown, 0.5).warrants_confirmation());
+    }
+
+    #[test]
+    fn the_confirmation_threshold_is_the_exact_boundary() {
+        // Strictly below warrants; at/above does not (so the constant is the pin).
+        let just_below = CONFIRM_BELOW_CONFIDENCE - 0.01;
+        let at = CONFIRM_BELOW_CONFIDENCE;
+        assert!(verdict(DocumentClass::Narrative, just_below).warrants_confirmation());
+        assert!(!verdict(DocumentClass::Narrative, at).warrants_confirmation());
+    }
+
+    #[test]
+    fn model_agreement_raises_confidence_and_keeps_class_and_signals() {
+        let before = verdict(DocumentClass::Narrative, 0.55);
+        let after = before.with_confirmed_class(DocumentClass::Narrative);
+        assert_eq!(after.class, DocumentClass::Narrative);
+        // Blended toward 1: 0.5 * (1 + 0.55) = 0.775; strictly higher than before.
+        assert!((after.confidence - 0.775).abs() < 1e-6, "got {}", after.confidence);
+        assert!(after.confidence > before.confidence);
+        // Signals are facts — untouched by confirmation.
+        assert_eq!(after.signals, before.signals);
+    }
+
+    #[test]
+    fn model_override_adopts_the_new_class_at_the_confirmed_floor() {
+        // The deterministic gate said Expository at 0.55; the model says Narrative.
+        let before = verdict(DocumentClass::Expository, 0.55);
+        let after = before.with_confirmed_class(DocumentClass::Narrative);
+        assert_eq!(after.class, DocumentClass::Narrative);
+        assert!((after.confidence - CONFIRMED_FLOOR).abs() < 1e-6);
+        // The recommendation now follows the corrected class.
+        assert_eq!(after.recommended_pipeline(), RecommendedPipeline::NarrativeHybrid);
+    }
+
+    #[test]
+    fn confirmed_confidence_stays_in_unit_range() {
+        for conf in [0.0, 0.3, 0.5, 0.64, 0.99] {
+            let agree = verdict(DocumentClass::Narrative, conf)
+                .with_confirmed_class(DocumentClass::Narrative);
+            let override_ = verdict(DocumentClass::Narrative, conf)
+                .with_confirmed_class(DocumentClass::Expository);
+            assert!((0.0..=1.0).contains(&agree.confidence));
+            assert!((0.0..=1.0).contains(&override_.confidence));
+        }
     }
 }

@@ -15,7 +15,7 @@
 //! wrappers stay trivial.
 
 use doctree_core::{
-    build_sequence, classify_document as core_classify, walk_with, BuildStep,
+    build_sequence, classify_document as core_classify, walk_with, BuildStep, Classification,
     ClassificationSignals, DocumentClass, Graph, RecommendedPipeline, WalkOptions,
 };
 use serde::{Deserialize, Serialize};
@@ -190,10 +190,12 @@ pub struct Routing {
     pub capabilities: Capabilities,
 }
 
-/// Classify `text` and resolve the routing against this build's capabilities.
-/// Pure; native-free; no managed state.
-pub fn classify_document_impl(text: &str) -> Routing {
-    let c = core_classify(text);
+/// Resolve a [`Classification`] into the full routing verdict against this
+/// build's capabilities. Pure; native-free; no managed state. Shared by the
+/// deterministic [`classify_document_impl`] and the gated `confirm_classification`
+/// command (B5 / Phase 6 #6), so a class the model confirmed or corrected
+/// re-resolves its pipeline through exactly the same logic as the first pass.
+pub fn routing_from_classification(c: Classification) -> Routing {
     let recommended = c.recommended_pipeline();
     let caps = Capabilities::compiled();
     let resolved = resolve_pipeline(recommended, caps);
@@ -209,6 +211,12 @@ pub fn classify_document_impl(text: &str) -> Routing {
         downgraded,
         capabilities: caps,
     }
+}
+
+/// Classify `text` and resolve the routing against this build's capabilities.
+/// Pure; native-free; no managed state.
+pub fn classify_document_impl(text: &str) -> Routing {
+    routing_from_classification(core_classify(text))
 }
 
 /// Tauri command: classify a document and tell the frontend which build command
@@ -236,6 +244,7 @@ pub fn run() {
             walk_document,
             build_steps,
             classify_document,
+            llm::confirm_classification,
             llm::llm_status,
             llm::llm_complete,
             llm::semantic_build_steps,

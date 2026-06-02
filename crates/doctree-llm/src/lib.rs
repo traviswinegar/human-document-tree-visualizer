@@ -115,6 +115,113 @@ where <slug> is a short lowercase identifier (e.g. \"char:mara\", \"place:cove\"
 }
 
 // ---------------------------------------------------------------------------
+// Document-class confirmation (Phase 6 #6, the deferred ADR-0005 step) — pure,
+// native-free prompt/grammar/parse helpers. The deterministic `classify_document`
+// gate (doctree-core) owns the verdict; when it lands a low-confidence prose call
+// (`Classification::warrants_confirmation`), the gated command layer asks the
+// model — using THIS grammar + prompt — to confirm or correct the class, then
+// folds the answer back with `Classification::with_confirmed_class`. Everything
+// here is plain strings: no model, so it's exercised by the default `cargo test`.
+// ---------------------------------------------------------------------------
+
+/// The GBNF grammar that constrains a class-confirmation completion to **exactly
+/// one** bare class tag. `Unknown` is deliberately absent: the model is only ever
+/// asked to adjudicate the `Narrative`↔`Expository` prose boundary (the
+/// deterministic gate owns "too short to tell"), and `Structured` is offered only
+/// as an escape hatch for a document the surface features misread as prose.
+///
+/// Whitespace-free for the same reason as [`graph_extraction_grammar`]: paired
+/// with an open assistant turn it makes the model commit to its answer token
+/// immediately instead of stalling on leading whitespace.
+pub fn classification_grammar() -> &'static str {
+    "root ::= \"narrative\" | \"expository\" | \"structured\"\n"
+}
+
+/// Soft cap on the document excerpt inside a confirmation prompt, in bytes. The
+/// class is a whole-document judgement that a representative opening already
+/// answers, so a small excerpt keeps the exchange fast and well inside context.
+pub const CONFIRM_DOC_BUDGET_BYTES: usize = 4_096;
+
+/// Build the grammar-constrained class-confirmation prompt: show the model the
+/// deterministic verdict it's checking plus a document excerpt, and ask for a
+/// single corrected/confirmed class tag. Pure and native-free (no model needed to
+/// construct it), so it's unit-tested without the `llm` feature.
+///
+/// Wrapped in the same ChatML envelope with an open assistant turn as
+/// [`build_extraction_prompt`], so — paired with [`classification_grammar`] — the
+/// model emits its one-word answer immediately.
+pub fn build_confirmation_prompt(
+    text: &str,
+    current: doctree_core::DocumentClass,
+) -> String {
+    // A representative excerpt: the opening, whitespace-collapsed, byte-budgeted
+    // on a char boundary so multi-byte text never splits mid-codepoint.
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut excerpt = collapsed.as_str();
+    if excerpt.len() > CONFIRM_DOC_BUDGET_BYTES {
+        let mut end = CONFIRM_DOC_BUDGET_BYTES;
+        while end > 0 && !excerpt.is_char_boundary(end) {
+            end -= 1;
+        }
+        excerpt = &excerpt[..end];
+    }
+
+    // The deterministic verdict, by its serialized snake_case tag, so the model
+    // knows what it's being asked to confirm or override.
+    let current_tag = match current {
+        doctree_core::DocumentClass::Narrative => "narrative",
+        doctree_core::DocumentClass::Expository => "expository",
+        doctree_core::DocumentClass::Structured => "structured",
+        doctree_core::DocumentClass::Unknown => "unknown",
+    };
+
+    let instructions = format!(
+        "You are a precise document classifier. Decide what kind of document the \
+EXCERPT is, choosing exactly one of:\n\
+- narrative: prose fiction — characters, dialogue, recounted past-tense action.\n\
+- expository: non-fiction prose — essays, articles, manuals, documentation.\n\
+- structured: heading/list/code/table reference material, not flowing prose.\n\n\
+A fast heuristic classifier guessed \"{current_tag}\" but was not confident. \
+Confirm that class if it fits, or correct it. Answer with the single class word only."
+    );
+
+    format!(
+        "<|im_start|>system\n{instructions}\n<|im_end|>\n\
+<|im_start|>user\nEXCERPT:\n{excerpt}\n<|im_end|>\n\
+<|im_start|>assistant\n"
+    )
+}
+
+/// Parse a model's class-confirmation answer into a [`doctree_core::DocumentClass`].
+/// [`classification_grammar`] already guarantees a clean tag, but this is tolerant
+/// of surrounding whitespace/case and stray text so a free (ungrammared) fallback
+/// completion still parses. Returns `None` if no known prose/structured tag is
+/// present (`Unknown` is never a confirmation answer — see the grammar).
+pub fn parse_confirmed_class(answer: &str) -> Option<doctree_core::DocumentClass> {
+    let a = answer.trim().to_lowercase();
+    // Prefer an exact one-word answer (the grammared path); else look for the
+    // first tag mentioned (a tolerant fallback for an unconstrained completion).
+    if a == "narrative" {
+        return Some(doctree_core::DocumentClass::Narrative);
+    }
+    if a == "expository" {
+        return Some(doctree_core::DocumentClass::Expository);
+    }
+    if a == "structured" {
+        return Some(doctree_core::DocumentClass::Structured);
+    }
+    [
+        ("narrative", doctree_core::DocumentClass::Narrative),
+        ("expository", doctree_core::DocumentClass::Expository),
+        ("structured", doctree_core::DocumentClass::Structured),
+    ]
+    .into_iter()
+    .filter_map(|(tag, class)| a.find(tag).map(|pos| (pos, class)))
+    .min_by_key(|(pos, _)| *pos)
+    .map(|(_, class)| class)
+}
+
+// ---------------------------------------------------------------------------
 // Embedding similarity (B4) — pure, native-free.
 //
 // The embedding *model* needs a native build (fastembed/ONNX, behind the
@@ -671,6 +778,59 @@ mod tests {
             "prompt should be bounded by the budget, got {} bytes",
             p.len()
         );
+    }
+
+    // --- #6: class-confirmation prompt / grammar / parse (native-free) --------
+
+    #[test]
+    fn classification_grammar_offers_the_three_prose_tags_not_unknown() {
+        let g = classification_grammar();
+        assert!(g.contains("\"narrative\""));
+        assert!(g.contains("\"expository\""));
+        assert!(g.contains("\"structured\""));
+        assert!(!g.contains("unknown"), "the model is never asked to say unknown");
+        // Whitespace-free root (one alternation), like the extraction grammar.
+        assert!(g.trim_start().starts_with("root ::="));
+    }
+
+    #[test]
+    fn confirmation_prompt_is_chatml_states_the_guess_and_carries_the_excerpt() {
+        use doctree_core::DocumentClass;
+        let p = build_confirmation_prompt("Mara read the letter twice.", DocumentClass::Expository);
+        // ChatML envelope with an OPEN assistant turn (commits the answer token).
+        assert!(p.starts_with("<|im_start|>system\n"));
+        assert!(p.trim_end().ends_with("<|im_start|>assistant"));
+        // Names the heuristic's guess so the model knows what it's checking.
+        assert!(p.contains("\"expository\""));
+        // Carries the document text.
+        assert!(p.contains("Mara read the letter twice."));
+    }
+
+    #[test]
+    fn confirmation_prompt_budgets_the_excerpt_on_a_char_boundary() {
+        // A long multi-byte document must be truncated without splitting a glyph.
+        let doc = "é ".repeat(4_000); // ~12 KB, well past CONFIRM_DOC_BUDGET_BYTES
+        let p = build_confirmation_prompt(&doc, doctree_core::DocumentClass::Narrative);
+        // It built a valid UTF-8 string (the char-boundary walk worked) and stayed
+        // bounded by the budget plus the small fixed preamble.
+        assert!(p.len() < CONFIRM_DOC_BUDGET_BYTES + 2_000);
+    }
+
+    #[test]
+    fn parse_confirmed_class_reads_clean_tags_and_tolerates_noise() {
+        use doctree_core::DocumentClass;
+        // Clean one-word answers (the grammared path).
+        assert_eq!(parse_confirmed_class("narrative"), Some(DocumentClass::Narrative));
+        assert_eq!(parse_confirmed_class("  Expository\n"), Some(DocumentClass::Expository));
+        assert_eq!(parse_confirmed_class("STRUCTURED"), Some(DocumentClass::Structured));
+        // Tolerant fallback: a sentence answer → the first tag mentioned.
+        assert_eq!(
+            parse_confirmed_class("This reads as narrative to me."),
+            Some(DocumentClass::Narrative)
+        );
+        // No known tag → None (caller keeps the deterministic verdict).
+        assert_eq!(parse_confirmed_class("I'm not sure"), None);
+        assert_eq!(parse_confirmed_class("unknown"), None);
     }
 
     #[test]

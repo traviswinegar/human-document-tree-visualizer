@@ -224,6 +224,22 @@ fn extract_blocking(
     Ok(completion.text)
 }
 
+/// Run a grammar-constrained class confirmation on a blocking thread, returning
+/// the model's single-word class answer. The grammar
+/// ([`doctree_llm::classification_grammar`]) forces the answer to one of the
+/// three prose/structured tags, so the text is trivially parseable downstream.
+#[cfg(feature = "llm")]
+fn confirm_class_blocking(
+    engine: Arc<Mutex<Option<doctree_llm::Engine>>>,
+    prompt: String,
+) -> Result<String, String> {
+    let mut guard = engine.lock().expect("llm engine mutex poisoned");
+    let completion = ensure_loaded(&mut guard)?
+        .complete_with_grammar(&prompt, doctree_llm::classification_grammar())
+        .map_err(|e| e.to_string())?;
+    Ok(completion.text)
+}
+
 /// Tauri command: free-form CPU completion. Async so it never blocks the
 /// webview's event loop — the actual inference is offloaded to a blocking
 /// thread, and only the small text result crosses back.
@@ -273,6 +289,50 @@ pub async fn semantic_build_steps(
 
     // 4. Ordered build steps for the animated hybrid build.
     Ok(build_sequence(&merged))
+}
+
+/// Tauri command: **LLM-confirmed routing** (B5 / Phase 6 #6 — the deferred
+/// ADR-0005 step). Run the deterministic classifier, and *only* when its verdict
+/// is a low-confidence prose call ([`doctree_core::Classification::warrants_confirmation`])
+/// ask the already-loaded model to confirm or correct the `Narrative`↔`Expository`
+/// class before routing. A confident verdict — or a `Structured`/`Unknown` one —
+/// skips the model entirely and routes exactly like `classify_document`.
+///
+/// The confirmed class re-resolves its pipeline through the same
+/// [`crate::routing_from_classification`] logic as the first pass, so the returned
+/// [`crate::Routing`] is shape- and rule-identical to the deterministic one — only
+/// the `class`/`confidence` may differ. Inference is offloaded to a blocking
+/// thread so the webview never stalls; classification and routing are pure.
+#[cfg(feature = "llm")]
+#[tauri::command]
+pub async fn confirm_classification(
+    text: String,
+    state: tauri::State<'_, LlmState>,
+) -> Result<crate::Routing, String> {
+    // 1. Deterministic verdict first (pure, fast).
+    let verdict = doctree_core::classify_document(&text);
+
+    // 2. Only a low-confidence prose call is worth the model's opinion; every
+    //    other verdict routes exactly like the native-free `classify_document`.
+    if !verdict.warrants_confirmation() {
+        return Ok(crate::routing_from_classification(verdict));
+    }
+
+    // 3. Ask the model for one corrected/confirmed class tag, on a blocking
+    //    thread. `verdict.class` is the guess we're asking it to adjudicate.
+    let prompt = doctree_llm::build_confirmation_prompt(&text, verdict.class);
+    let engine = state.engine.clone();
+    let answer = tauri::async_runtime::spawn_blocking(move || confirm_class_blocking(engine, prompt))
+        .await
+        .map_err(|e| format!("confirmation task failed to join: {e}"))??;
+
+    // 4. Fold the answer back in — keeping the deterministic verdict if the model
+    //    produced no recognizable tag — then route through the shared logic.
+    let confirmed = match doctree_llm::parse_confirmed_class(&answer) {
+        Some(class) => verdict.with_confirmed_class(class),
+        None => verdict,
+    };
+    Ok(crate::routing_from_classification(confirmed))
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +463,17 @@ pub fn semantic_build_steps(
 ) -> Result<Vec<BuildStep>, String> {
     let _ = (&text, &params); // contract parity with the gated signature
     Err(no_llm_error())
+}
+
+/// Native-free stand-in for LLM-confirmed routing: with no engine to consult,
+/// it returns the deterministic routing **unchanged** (not an error). Confirmation
+/// is a pure enhancement, never a hard dependency — so the default build still
+/// answers this command; it simply can't second-guess a low-confidence prose
+/// verdict. Same IPC contract (`{ text }` in, `Routing` out) as the gated form.
+#[cfg(not(feature = "llm"))]
+#[tauri::command]
+pub fn confirm_classification(text: String) -> Result<crate::Routing, String> {
+    Ok(crate::classify_document_impl(&text))
 }
 
 /// The shared "no engine in this build" message, pointing at the fix.
@@ -588,6 +659,23 @@ mod tests {
         assert_eq!(v["label"], "Mara");
         assert_eq!(v["kind"], "character"); // NodeKind → snake_case tag
         assert!(v["score"].is_number());
+    }
+
+    #[cfg(not(feature = "llm"))]
+    #[test]
+    fn confirm_classification_stub_matches_deterministic_routing() {
+        // On a native-free build there is no model to consult, so confirmation
+        // must fall back to *exactly* the deterministic routing — never an error,
+        // never a different verdict. (Under `llm` the command may instead consult
+        // the model on a low-confidence prose call; that path is desktop-only.)
+        let doc = "Mara found the letter where Vane had left it. She read it twice, \
+            then looked out at the dark harbor. \"The ship is gone,\" she said. The cove was empty.";
+        let confirmed = confirm_classification(doc.to_string()).expect("stub never errors");
+        let deterministic = crate::classify_document_impl(doc);
+        assert_eq!(
+            serde_json::to_value(&confirmed).unwrap(),
+            serde_json::to_value(&deterministic).unwrap()
+        );
     }
 
     #[test]
