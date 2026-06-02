@@ -1,7 +1,12 @@
 # Phase 5 — Persistence, ingestion, readability
 
-> **Status:** active (opened 2026-06-02). Archived when all four work items ship
-> and their triples are recorded in `BUILD_LOG.md`.
+> **Status:** ARCHIVED (shipped 2026-06-02). All four work items shipped and their
+> triples are recorded in `BUILD_LOG.md`: #1 clear-on-open + elapsed timer (`#46`,
+> commit `36b3a56`); #3 PDF ingestion / ADR-0006 (`#48`, commit `7ec0dcb`); #4
+> save/load/CRUD library / ADR-0007 (`#50`, commit `bc07a81`); #2 edge bundling
+> first cut (`#52`, commit `b5e99a6`). The deferred follow-up — true hierarchical-LCA
+> merged-geometry bundling + its ADR — remains in the Phase 5 backlog (BUILD_LOG
+> Catch-all), to be opened as a fresh plan when the user prioritizes it.
 
 Four user-driven asks, landed after the #43 left-stats panel, while the user was
 running the desktop app on a ~650 KB / 400-page novel (18 437 nodes / 46 477
