@@ -93,12 +93,12 @@ while it compiles.
 
 ## Current Position
 
-**A6 — 3D render interactions on the fixture: color-by-type (done in A5), force
-layout, orbit/zoom/pan, node search, drag, animated/directional edges, reset
-view.** Stream A native-free core complete (A1–A5) and the gated LLM crate stands
-up (B1). GPU acceleration is blocked by the bleeding-edge toolchain (logged under
-Catch-all for user sign-off); CPU inference is the working path and unblocks all
-functional LLM acceptance (B2/B3/B5).
+**A7 — live animated build + replay: stream the spine in build order so the graph
+grows on screen, record the ordered build, and replay it; explorable after.**
+Stream A render path complete (A1–A6): the fixture renders and is fully
+interactive (search/focus/particles/reset). Next, drive the graph from an ordered
+event stream instead of one static `graphData()` load (this is the frontend half
+that A8's Tauri walker stream will later feed). GPU still CPU-only (Catch-all).
 
 ---
 
@@ -121,6 +121,9 @@ functional LLM acceptance (B2/B3/B5).
 - **A5** — frontend scaffold (Vite + TS + 3d-force-graph) renders the fixture.
   Commit `95f224b` · test `npx tsc --noEmit` (exit 0) + `npm run build` (tsc && vite build, exit 0); runtime render confirmed via dev-handle scene introspection (32 three.js meshes = 13 node spheres + 18 link cylinders + interaction mesh; canvas 1280×720; WebGL2 live; zero console errors) · src `src/main.ts` (graph construction, explicit `width()/height()` at init), `src/types.ts` (mirrors `schema.rs`), `src/colors.ts` (palette).
   Note: `preview_screenshot` times out against the continuously-animating WebGL canvas (the rAF render loop never idles) — a tooling limitation, not an app defect; render verified by introspection instead.
+- **A6** — 3D render interactions (search + focus + animated edges + reset).
+  Commit `b33181b` · test `npx tsc --noEmit` + `npm run build` (both exit 0); runtime verified via dev-handle introspection: search "mara"→2 matches (`sent:1`,`char:mara`), 11 nodes + 17 links dimmed to low alpha; "vane"→2 (`sent:2`,`char:vane`); focus tween moves the camera toward the matched node; reset re-fits; scene = 42 meshes (13 nodes + 18 link cylinders + 10 semantic directional particles + interaction mesh) · src `src/main.ts` (`runSearch`, `focusNode`, `resetView`, highlight-aware `nodeColor`/`linkColor`, `linkDirectionalParticles`), `index.html` (search box + reset button).
+  Note: precise *settled* camera coordinate not asserted — eval polling loops time out against the animating canvas; camera-moves-toward-node and reset-re-fits were both confirmed directly.
 
 ---
 
