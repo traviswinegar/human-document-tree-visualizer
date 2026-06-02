@@ -5,7 +5,10 @@
   "type": "module",
   "description": "3D graph frontend for human-document-tree — walks a document and renders its structure as a navigable, animated 3D graph.",
   "scripts": {
+    "build:wasm": "wasm-pack build crates/doctree-wasm --target web --out-dir ../../src/wasm --out-name doctree_wasm",
+    "predev": "npm run build:wasm",
     "dev": "vite",
+    "prebuild": "npm run build:wasm",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri"

@@ -17,6 +17,9 @@ build/
 src-tauri/gen/
 src-tauri/WixTools/
 
+# --- Generated WASM package (wasm-pack output; rebuilt by `npm run build:wasm`) ---
+src/wasm/
+
 # --- Local LLM model files (loaded from disk at runtime, never committed) ---
 *.gguf
 *.bin
