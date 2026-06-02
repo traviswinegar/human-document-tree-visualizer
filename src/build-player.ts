@@ -14,30 +14,39 @@ const idOf = (ref: string | { id: string }): string =>
 // preserve the input node order (the walker emits its spine in document order,
 // "from word one") and reveal each edge the instant both endpoints are present,
 // flushing danglers last. Same graph in ⇒ same sequence out (faithful replay).
+//
+// An edge becomes revealable exactly when the *later* of its two endpoints has
+// appeared, i.e. at node index max(srcIndex, tgtIndex). Bucketing edges by that
+// index (in their original array order within each bucket) reproduces the
+// reveal-as-soon-as-both-present ordering in O(n + e) instead of the naïve
+// O(n · e) rescan — which matters when a restored graph carries tens of thousands
+// of edges (the 650 KB novel is ~46k) and the sequence is rebuilt to replay it.
 export function buildSequence(graph: DocGraph): BuildEvent[] {
-  const present = new Set<string>();
-  const emitted = new Set<number>();
-  const seq: BuildEvent[] = [];
-
-  for (const node of graph.nodes) {
-    seq.push({ kind: "node", node });
-    present.add(node.id);
-    graph.edges.forEach((edge, i) => {
-      if (
-        !emitted.has(i) &&
-        present.has(idOf(edge.source)) &&
-        present.has(idOf(edge.target))
-      ) {
-        seq.push({ kind: "edge", edge });
-        emitted.add(i);
-      }
-    });
-  }
-  // Edges whose endpoints never both appear (dangling refs) still get emitted so
-  // the replayed graph is identical to the source graph.
-  graph.edges.forEach((edge, i) => {
-    if (!emitted.has(i)) seq.push({ kind: "edge", edge });
+  // First-appearance index of each node id (later duplicates, if any, defer to the
+  // first, matching the original "present once added" semantics).
+  const indexOf = new Map<string, number>();
+  graph.nodes.forEach((node, i) => {
+    if (!indexOf.has(node.id)) indexOf.set(node.id, i);
   });
+
+  // readyAfter[i] = edges to emit immediately after node i is revealed.
+  const readyAfter: BuildEvent[][] = graph.nodes.map(() => []);
+  const danglers: BuildEvent[] = []; // an endpoint that never appears as a node
+  for (const edge of graph.edges) {
+    const s = indexOf.get(idOf(edge.source));
+    const t = indexOf.get(idOf(edge.target));
+    if (s === undefined || t === undefined) danglers.push({ kind: "edge", edge });
+    else readyAfter[Math.max(s, t)].push({ kind: "edge", edge });
+  }
+
+  const seq: BuildEvent[] = [];
+  graph.nodes.forEach((node, i) => {
+    seq.push({ kind: "node", node });
+    for (const ev of readyAfter[i]) seq.push(ev);
+  });
+  // Dangling edges still get emitted last so the replayed graph is identical to
+  // the source graph.
+  for (const ev of danglers) seq.push(ev);
 
   return seq;
 }
@@ -54,6 +63,13 @@ export interface BuildPlayer {
   // slow model-backed semantic/embedding delta is appended the moment it arrives,
   // so the graph keeps growing instead of the user staring at a static spine.
   append(events: BuildEvent[]): void;
+  // Jump straight to the finished state *without animating or repainting* — used
+  // when a saved graph is restored whole (it lands on its stored layout at once).
+  // The caller has already populated the scene, so this only syncs internal state
+  // (step + working arrays) so isDone() reports true and a later replay() can
+  // re-stream the whole growth from empty. Deliberately does not call apply or
+  // onProgress (the caller owns the static presentation).
+  complete(): void;
   isPlaying(): boolean;
   isDone(): boolean;
 }
@@ -173,6 +189,16 @@ export function createBuildPlayer(opts: BuildPlayerOptions): BuildPlayer {
     report();
   }
 
+  // Fast-forward internal state to the end with no apply/report (see interface).
+  function complete(): void {
+    stop();
+    for (; step < sequence.length; step++) {
+      const ev = sequence[step];
+      if (ev.kind === "node") nodes.push(ev.node);
+      else edges.push(ev.edge);
+    }
+  }
+
   return {
     play,
     pause,
@@ -183,6 +209,7 @@ export function createBuildPlayer(opts: BuildPlayerOptions): BuildPlayer {
     },
     setSpeed,
     append,
+    complete,
     isPlaying: () => timer !== null,
     isDone: () => step >= sequence.length,
   };

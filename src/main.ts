@@ -1528,7 +1528,6 @@ function restoreSavedDoc(doc: SavedDoc): void {
   player?.pause();
   cancelPendingApply?.();
   cancelPendingApply = null;
-  player = null;
   clearSearch();
   hideDetails();
   clearDocActive();
@@ -1588,6 +1587,107 @@ function restoreSavedDoc(doc: SavedDoc): void {
   if (bundleEdges) applyBundling();
 
   graph.zoomToFit(800, 80);
+
+  // Phase 6 #1 — make a reopened graph replayable. v1 left `player = null`, so a
+  // restored graph was frozen with no scrub/replay. Rebuild a player from the saved
+  // nodes/edges (their stored order is already a valid reveal sequence — each edge's
+  // endpoints precede it) and `complete()` it so it starts finished: the full graph
+  // is already on screen on its saved layout, and opening stays instant. Pressing
+  // Replay (either chip control) resets to empty and re-streams the growth, relaxing
+  // back toward the saved shape (the node objects keep their seeded positions) and
+  // snapping to the exact saved layout when it finishes. Reuses the same coalesced-
+  // apply throttle as startBuild so a large saved graph replays without stutter.
+  let lastApplyAt = 0;
+  let trailingTimer: number | null = null;
+  let pending: { nodes: GraphNode[]; edges: GraphEdge[] } | null = null;
+  const commit = (ns: GraphNode[], es: GraphEdge[]): void => {
+    lastApplyAt = performance.now();
+    graph.graphData({
+      nodes: ns as unknown as NodeObject[],
+      links: es as unknown as LinkObject[],
+    });
+    if (currentLayout === "layers") pinLayers(graph.graphData().nodes);
+    renderSidebar(ns);
+    renderStats(ns, es);
+  };
+  const flushApply = (): void => {
+    if (trailingTimer !== null) {
+      window.clearTimeout(trailingTimer);
+      trailingTimer = null;
+    }
+    if (pending) {
+      commit(pending.nodes, pending.edges);
+      pending = null;
+    }
+  };
+  cancelPendingApply = () => {
+    if (trailingTimer !== null) {
+      window.clearTimeout(trailingTimer);
+      trailingTimer = null;
+    }
+    pending = null;
+  };
+  let lastFitAt = 0;
+  const p = createBuildPlayer({
+    sequence: buildSequence({ nodes: doc.nodes, edges: doc.edges }),
+    intervalMs: currentIntervalMs,
+    apply: (ns, es) => {
+      // Empty arrays == replay() just reset to the start: re-enable ticking so the
+      // regrowth animates (the static restore froze the sim to hold the layout).
+      if (ns.length === 0 && es.length === 0) {
+        graph.cooldownTicks(Infinity);
+        commit(ns, es);
+        return;
+      }
+      const interval = applyIntervalForSize(ns.length);
+      if (interval === 0) {
+        commit(ns, es);
+        return;
+      }
+      pending = { nodes: ns, edges: es };
+      if (trailingTimer !== null) return; // newest state parked in `pending`
+      const elapsed = performance.now() - lastApplyAt;
+      if (elapsed >= interval) {
+        flushApply();
+      } else {
+        trailingTimer = window.setTimeout(() => {
+          trailingTimer = null;
+          flushApply();
+        }, interval - elapsed);
+      }
+    },
+    onProgress: (stepN, total, done) => {
+      const pct = total === 0 ? 0 : Math.round((stepN / total) * 100);
+      buildBarFillEl.style.width = `${done ? 100 : pct}%`;
+      playPauseEl.textContent = p.isPlaying() ? ICON_PAUSE : done ? ICON_REPLAY : ICON_PLAY;
+      buildProgressEl.textContent = done ? "saved" : `${stepN}/${total}`;
+      const now = performance.now();
+      if (done) {
+        // Snap back to the exact saved layout the replay relaxed toward, then freeze
+        // and flush the final (complete) state — mirrors the initial static restore.
+        if (positions) {
+          for (const ro of nodeObjs) {
+            const pos = positions[asNode(ro).id];
+            if (pos) {
+              ro.x = pos.x;
+              ro.y = pos.y;
+              ro.z = pos.z;
+            }
+          }
+          graph.cooldownTicks(0);
+        }
+        flushApply();
+        if (bundleEdges) applyBundling();
+        graph.zoomToFit(800, 80);
+        lastFitAt = now;
+      } else if (now - lastFitAt > 250) {
+        graph.zoomToFit(500, 80);
+        lastFitAt = now;
+      }
+    },
+  });
+  player = p;
+  p.complete(); // start finished — the saved graph is already on its layout
 }
 
 // --- Library modal ----------------------------------------------------------
