@@ -106,24 +106,26 @@ native-free).
 
 ## Current Position
 
-**B3 — LLM semantic layer (grammar-constrained), merged onto the deterministic
-spine → animated semantic edges.** Stream A is **complete** end to end (doc →
-walker → ordered build steps → animated, interactive, replayable 3D graph;
-A1–A8). **B2 just landed:** a gated Tauri command (`llm_complete`, behind the
-`llm` feature) lazily loads a CPU model and round-trips text to the frontend,
-with `llm_status` always available so the UI can detect the capability — and the
-canonical GBNF grammar is exercised by an ignored live round-trip test (the
-user's desktop end test). The default build stays native-free (verified via
-`cargo tree`); the `--features llm` build compiles clean under MSVC.
+**B4 — embeddings → similarity edges + search (gated, vectordb).** Stream A is
+**complete** end to end (doc → walker → ordered build steps → animated,
+interactive, replayable 3D graph; A1–A8). **B3 just landed:** a gated Tauri
+command (`semantic_build_steps`, behind the `llm` feature) walks a document into
+its deterministic spine, builds an anchored extraction prompt from the spine's
+Section/Sentence text, runs the grammar-constrained model to emit a
+`{nodes,edges}` fragment, **merges** it onto the spine (spine wins id collisions)
+and prunes dangling semantic edges — returning the same `BuildStep` stream the
+animated build already replays, so the flowing-particle semantic edges need no
+new render path. The default build stays native-free (verified via `cargo
+tree`); the `--features llm` build compiles clean under MSVC (my code
+warning-free; only the upstream `momusdev_*` crates warn).
 
-B3 is the next *build-order* step: prompt the model (grammar-constrained to
-`doctree_core::GRAPH_GBNF`) to extract the **semantic** nodes/edges the
-structural walker can't (entities, ideas, relationships), then **merge** them
-onto the existing spine so they stream in as the flowing-particle semantic edges
-the renderer already distinguishes. CPU is the working path; GPU still blocked
-(Catch-all). Model at `DOCTREE_MODEL_PATH` (qwen3-4b-q4km.gguf). Desktop-only at
-runtime — the live merge is the user's end test, but the merge logic, the
-prompt builder, and the spine-union are pure and unit-testable headlessly.
+B4 is the next *build-order* step: embed the spine/semantic nodes (gated
+`vectordb` sub-feature → momusdev's LanceDB store), add **similarity edges**
+between near-neighbour nodes, and expose semantic **search** (query → nearest
+nodes) to the frontend. CPU is the working path; GPU still blocked (Catch-all).
+Model at `DOCTREE_MODEL_PATH`. Desktop-only at runtime — the live embed/query is
+the user's end test, but the edge-derivation and ranking logic are pure and
+unit-testable headlessly.
 
 > **Stream C (C1) landed since this position was set.** The public web build now
 > walks documents in-browser via WASM (`doctree-core` → wasm32, same engine as
@@ -141,8 +143,9 @@ prompt builder, and the spine-union are pure and unit-testable headlessly.
 > node both jumps to/highlights its text in the sidebar and opens a details panel
 > (kind, provenance, text, navigable connections), with the text→node direction
 > wired too (D4). All four are frontend-only — the default build is still
-> native-free. Verified live via dev handles (see D1–D4 entries below). **B2
-> remains the next *build-order* step.**
+> native-free. Verified live via dev handles (see D1–D4 entries below). _(B2 and
+> B3 have since landed; B4 is now the next *build-order* step — see Current
+> Position.)_
 
 > **User direction (2026-06-02, to discuss in the morning):** build the *full*
 > pipeline for **both** the LLM path **and** the deterministic "Tier 1" path so
@@ -202,6 +205,10 @@ prompt builder, and the spine-union are pure and unit-testable headlessly.
   Commit `2862cd7` · tests `src-tauri/src/llm.rs::tests::*` (5: `status_enabled_tracks_the_compiled_feature`, `status_names_the_model_path_env`, `status_present_implies_a_path`, `status_serializes_camel_case_for_the_frontend`, `completion_dto_maps_every_field_and_tags_cpu`) (`cargo test -p doctree-tauri`) + ignored live round-trip `src-tauri/tests/llm_roundtrip.rs` (`freeform_completion_returns_text`, `grammar_constrained_output_is_schema_shaped_json`) · src `src-tauri/src/llm.rs` (`llm_status`/`llm_status_impl`, `CompletionDto`, gated `LlmState` + `complete_blocking` + async `llm_complete`; native-free `llm_complete` stub), `src-tauri/src/lib.rs` (`mod llm`, gated `.manage(LlmState)`, `generate_handler!` + `llm_status`/`llm_complete`), `src-tauri/Cargo.toml` (`llm`/`cuda`/`vulkan` features → `doctree-llm`; non-optional native-free dep).
   Verified: default `cargo test --workspace` **59 green, native-free** (`cargo tree -p doctree-tauri` shows no `momusdev`/`llama`); gated `cargo check -p doctree-tauri --features llm` and `cargo test --no-run --features llm` compile clean under MSVC (proves `Engine: Send+Sync` for managed state, the `spawn_blocking` async-command wiring, and that the round-trip test binary builds). The command lazily loads the model on first call and offloads inference to a blocking thread so the webview never stalls.
   Note: the **live model load** (2.33 GB qwen3-4b on CPU) + the GBNF grammar-compile check are the user's desktop end test — the Tauri window cannot be launched/exercised in this headless env (as with A8). Run with `set DOCTREE_MODEL_PATH=…\qwen3-4b-q4km.gguf` then `cargo test -p doctree-tauri --features llm -- --ignored --nocapture`.
+- **B3** — LLM semantic layer (grammar-constrained) merged onto the spine.
+  Commit `5521c23` · tests `crates/doctree-core/src/schema.rs::tests::{prune_dangling_edges_drops_only_unwired_edges, prune_is_a_noop_on_a_valid_graph}` + `crates/doctree-llm/src/lib.rs::tests::{extraction_prompt_anchors_spine_and_lists_kinds, extraction_prompt_respects_the_doc_budget}` + `src-tauri/src/llm.rs::tests::merge_semantic_onto_spine_is_authoritative_and_valid` (all on the default native-free build) + ignored end-to-end `src-tauri/tests/llm_roundtrip.rs::hybrid_extraction_merges_onto_the_spine` · src `crates/doctree-core/src/schema.rs` (`Graph::prune_dangling_edges`), `crates/doctree-llm/src/lib.rs` (`build_extraction_prompt`, `PROMPT_DOC_BUDGET_BYTES`), `src-tauri/src/llm.rs` (pure `merge_semantic_onto_spine`; gated `ensure_loaded`/`extract_blocking`/async `semantic_build_steps`; native-free `semantic_build_steps` stub), `src-tauri/src/lib.rs` (`generate_handler!` + `llm::semantic_build_steps`).
+  Verified: default `cargo test` green (core 36, llm 7, tauri 13) with ZERO native deps (`cargo tree -p doctree-tauri` shows no `momusdev`/`llama`/`lance`); gated `cargo test --no-run -p doctree-tauri --features llm` compiles clean under MSVC (my crates warning-free; only upstream `momusdev_*` warn) and builds the ignored hybrid round-trip binary. The merge is spine-authoritative: `Graph::merge` keeps the deterministic spine on id collisions, appends semantic edges, then `prune_dangling_edges` drops any the model wired to ids it didn't ground — the hybrid graph is valid by construction and orders into the existing `BuildStep` stream (no new frontend render path).
+  Note: the **live extraction merge** (walk → prompt → grammar-constrained model → fragment → spine-union → build steps) is the user's desktop end test — run as the B2 note above. The orchestration's pure pieces (prompt builder, spine-union, prune) are unit-tested headlessly; the model round-trip is not runnable in this env.
 
 ---
 
