@@ -132,6 +132,13 @@ const neighborIds = new Set<string>();
 let bundleEdges = false;
 let bundleShown = false;
 
+// Semantic edges (the LLM-inferred meaning) carry 2 flowing particles; the
+// deterministic structural spine carries none. Named (not inlined) so the
+// large-graph render LOD can suppress particles wholesale and restore this exact
+// accessor when the graph shrinks again. (Phase 7 #1 / ADR-00011.)
+const SEMANTIC_PARTICLES = (l: LinkObject): number =>
+  asLink(l).provenance === "semantic" ? 2 : 0;
+
 const graph = new ForceGraph3D(container, { controlType: "orbit" })
   .width(window.innerWidth)
   .height(window.innerHeight)
@@ -155,6 +162,14 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
   .nodeOpacity(1)
   .onNodeClick((n) => selectNode(n))
   .onBackgroundClick(() => clearSelection())
+  // Node dragging is unused — the force sim and the layout modes own every node
+  // position, and nothing here repositions a node by hand. Leaving it on (the
+  // library default) keeps a DragControls live, whose pointer-cancel path reads a
+  // node coord on an interrupted drag and throws the transient "Cannot read
+  // properties of undefined (reading 'x')" dev-mode warning. Disabling it removes
+  // the unused interaction and the warning with it; orbit/zoom/pan (the camera
+  // OrbitControls) are a separate control and unaffected. (Phase 7, dev-warning fix.)
+  .enableNodeDrag(false)
   .linkColor((l) => {
     const e = asLink(l);
     const base = edgeColor(e.kind);
@@ -173,7 +188,7 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
   .linkOpacity(0.5)
   // Semantic edges (the LLM-inferred meaning) animate with flowing particles;
   // the deterministic structural spine stays static — motion = "inferred".
-  .linkDirectionalParticles((l) => (asLink(l).provenance === "semantic" ? 2 : 0))
+  .linkDirectionalParticles(SEMANTIC_PARTICLES)
   .linkDirectionalParticleSpeed(0.006)
   .linkDirectionalParticleWidth(1.4)
   // Edge bundling (Phase 6 #4 / ADR-0009). When the merged hierarchical bundle is
@@ -237,7 +252,40 @@ function applyForceTuning(n: number): void {
   const lf = graph.d3Force("link") as ForceTunable | undefined;
   lf?.distance?.(linkDist);
 }
+
+// --- Adaptive render LOD for very large graphs (Phase 7 #1 / ADR-00011) ------
+// #61 collapsed the cross-link layer to one draw call, so the remaining per-frame
+// cost that makes orbit/zoom/pan heavy on a very large graph (the 18k-node /
+// 46k-edge novel) is: one draw call per node sphere, the animated semantic
+// particles (continuous per-frame churn), and — while bundling is off — thousands
+// of native cross-link lines. Above a node threshold we shed the cheapest-to-lose
+// of those: auto-enable the merged bundle (46k native lines → 1), drop the
+// semantic particles, and coarsen the node-sphere geometry. Re-applied wherever
+// the final node count becomes known, alongside applyForceTuning.
+//
+// (The remaining lever — a per-node InstancedMesh collapsing the node draw calls
+// to one — is deliberately deferred per ADR-00011: it requires replacing
+// 3d-force-graph's built-in picking / hover / theming, for which this project has
+// no agent-runnable verification, so it wants interactive testing in the loop.)
+const LARGE_GRAPH_NODES = 2000;
+// Once the user clicks the bundle toggle they own that choice; until then we
+// auto-manage bundling by graph size.
+let userToggledBundle = false;
+
+function applyRenderLOD(n: number): void {
+  const large = n >= LARGE_GRAPH_NODES;
+  // Coarser node spheres on a big graph (fewer triangles per node; default is 8).
+  graph.nodeResolution(large ? 6 : 8);
+  // Suppress the per-frame semantic particles on a big graph; restore the exact
+  // accessor when small again.
+  graph.linkDirectionalParticles(large ? 0 : SEMANTIC_PARTICLES);
+  // Auto-manage bundling by size until the user takes manual control: a big graph
+  // turns it on (the single biggest edge-side win), a small graph leaves it off.
+  if (!userToggledBundle && bundleEdges !== large) setBundling(large);
+}
+
 applyForceTuning(0); // baseline for the empty / initial graph
+applyRenderLOD(0); // baseline render LOD (small-graph defaults; no behavior change)
 
 // --- Layout dropdown -------------------------------------------------------
 // Why no top-down/left-right/radial *DAG* layout? The document graph isn't a
@@ -306,6 +354,7 @@ function applyLayout(mode: LayoutMode): void {
     graph.numDimensions(mode === "force2d" ? 2 : 3);
   }
   applyForceTuning(data.nodes.length);
+  applyRenderLOD(data.nodes.length);
   // A restored saved graph freezes the sim (cooldownTicks 0) to hold its exact
   // layout; a deliberate layout switch is the user asking to reflow, so re-enable
   // ticking before reheating or the reheat would be a no-op.
@@ -376,7 +425,10 @@ function setBundling(on: boolean): void {
   else clearMergedBundle();
 }
 
-bundleEl.addEventListener("click", () => setBundling(!bundleEdges));
+bundleEl.addEventListener("click", () => {
+  userToggledBundle = true; // user takes manual control; stop auto-managing by size
+  setBundling(!bundleEdges);
+});
 
 // --- Bloom glow ------------------------------------------------------------
 // The single biggest "the graph is so dark" lever: an UnrealBloom pass makes the
@@ -1107,6 +1159,7 @@ function startBuild(source: BuildSource): void {
   renderRouting(source); // B5 — surface the class + resolved pipeline / downgrade
   setSemanticPending(false); // cleared now; turned on below if a delta is pending
   applyForceTuning(source.nodeCount); // size the force field for the (final) spine
+  applyRenderLOD(source.nodeCount); // size-tier the render LOD for the (final) spine
   // B4 — offer "find by meaning" only on a build that can actually embed.
   const meaningOn = Boolean(source.routing?.capabilities.vectordb);
   meaningSearchEl.classList.toggle("hidden", !meaningOn);
@@ -1224,6 +1277,7 @@ function startBuild(source: BuildSource): void {
           source.edgeCount += delta.edgeCount;
           statsEl.textContent = `${source.nodeCount} nodes · ${source.edgeCount} edges (${source.origin})`;
           applyForceTuning(source.nodeCount); // re-size the field for the grown graph
+          applyRenderLOD(source.nodeCount); // re-tier the render LOD for the grown graph
           // The semantic/similarity overlay just landed — re-stamp so the new
           // cross-links join the bundles instead of cutting straight across.
           if (bundleEdges) rebuildMergedBundle();
@@ -1615,6 +1669,7 @@ function restoreSavedDoc(doc: SavedDoc): void {
   graph.numDimensions(currentLayout === "force2d" ? 2 : 3);
   if (currentLayout === "layers") pinLayers(graph.graphData().nodes);
   applyForceTuning(doc.nodes.length);
+  applyRenderLOD(doc.nodes.length); // size-tier the render LOD for the restored graph
 
   renderSidebar(doc.nodes);
   renderStats(doc.nodes, doc.edges);
