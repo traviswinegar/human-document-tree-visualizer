@@ -106,17 +106,24 @@ native-free).
 
 ## Current Position
 
-**B2 — Tauri inference round-trip (ADR-0001 acceptance): a desktop command calls
-`momusdev_llm` (qwen3-4b, CPU) and returns text to the frontend.** Stream A is
-**complete** end to end: doc → deterministic walker → ordered build steps →
-animated, interactive, replayable 3D graph, with a Tauri app crate exposing
-`walk_document`/`build_steps` over `doctree-core` and a browser-fixture fallback
-(A1–A8, all committed + verified, default build native-free, 48 tests green).
-B2 begins Stream B (the gated LLM layer): wire a Tauri command behind the `llm`
-feature that runs CPU inference and round-trips text, then verify the GBNF
-grammar actually compiles (watch the ~5-alternative ceiling on `nodekind`/
-`edgekind`, flagged at A3). CPU is the working path; GPU is still blocked
-(Catch-all). Model at `DOCTREE_MODEL_PATH` (qwen3-4b-q4km.gguf).
+**B3 — LLM semantic layer (grammar-constrained), merged onto the deterministic
+spine → animated semantic edges.** Stream A is **complete** end to end (doc →
+walker → ordered build steps → animated, interactive, replayable 3D graph;
+A1–A8). **B2 just landed:** a gated Tauri command (`llm_complete`, behind the
+`llm` feature) lazily loads a CPU model and round-trips text to the frontend,
+with `llm_status` always available so the UI can detect the capability — and the
+canonical GBNF grammar is exercised by an ignored live round-trip test (the
+user's desktop end test). The default build stays native-free (verified via
+`cargo tree`); the `--features llm` build compiles clean under MSVC.
+
+B3 is the next *build-order* step: prompt the model (grammar-constrained to
+`doctree_core::GRAPH_GBNF`) to extract the **semantic** nodes/edges the
+structural walker can't (entities, ideas, relationships), then **merge** them
+onto the existing spine so they stream in as the flowing-particle semantic edges
+the renderer already distinguishes. CPU is the working path; GPU still blocked
+(Catch-all). Model at `DOCTREE_MODEL_PATH` (qwen3-4b-q4km.gguf). Desktop-only at
+runtime — the live merge is the user's end test, but the merge logic, the
+prompt builder, and the spine-union are pure and unit-testable headlessly.
 
 > **Stream C (C1) landed since this position was set.** The public web build now
 > walks documents in-browser via WASM (`doctree-core` → wasm32, same engine as
@@ -191,6 +198,10 @@ grammar actually compiles (watch the ~5-alternative ceiling on `nodekind`/
   Commit `423352f` · test `npx tsc --noEmit` + `npx vite build` (both exit 0); runtime verified: sample narrative reconstructs as 1 heading + 5 paragraphs + 15 ordered sentences with stable `data-node-id`s; canvas width tracks the sidebar (920 open / 1280 collapsed) and collapse/reopen toggles cleanly · src `src/main.ts` (`renderSidebar` — sections+sentences tiled, sentences grouped into paragraphs by span containment with an ordered fallback; `layoutGraph`/`setSidebar`; `renderSidebar` called from `commit`), `index.html` (`#sidebar`/`#sidebar-doc`/`#node-details` + styles). Only sentence/section nodes carry usable text+span (clauses/quotes/refs are sub-spans inside sentences ⇒ excluded; walker `walker.rs:73-167`).
 - **D4** — click a node to jump to its text + open a details panel.
   Commit `159a6b6` · test `npx tsc --noEmit` + `npx vite build` (both exit 0); runtime verified via `__doctreeSelect`: selecting `sent:1` highlights its line and lists mentions/part_of/precedes; selecting `term:charts` (no own line) lights its neighbour sentence and lists co_occurs_with/mentions; clicking a connection navigates to `term:cove` and re-highlights its sentences; background-click hides the panel and clears the text highlight; zero console errors · src `src/main.ts` (`jumpToNode`/`clearDocActive`, `showDetails`/`hideDetails`, `PROV_META`, `selectNodeById`, delegated click wiring on `#sidebar-doc`/`#node-details`).
+- **B2** — gated Tauri inference round-trip (ADR-0001 acceptance).
+  Commit `2862cd7` · tests `src-tauri/src/llm.rs::tests::*` (5: `status_enabled_tracks_the_compiled_feature`, `status_names_the_model_path_env`, `status_present_implies_a_path`, `status_serializes_camel_case_for_the_frontend`, `completion_dto_maps_every_field_and_tags_cpu`) (`cargo test -p doctree-tauri`) + ignored live round-trip `src-tauri/tests/llm_roundtrip.rs` (`freeform_completion_returns_text`, `grammar_constrained_output_is_schema_shaped_json`) · src `src-tauri/src/llm.rs` (`llm_status`/`llm_status_impl`, `CompletionDto`, gated `LlmState` + `complete_blocking` + async `llm_complete`; native-free `llm_complete` stub), `src-tauri/src/lib.rs` (`mod llm`, gated `.manage(LlmState)`, `generate_handler!` + `llm_status`/`llm_complete`), `src-tauri/Cargo.toml` (`llm`/`cuda`/`vulkan` features → `doctree-llm`; non-optional native-free dep).
+  Verified: default `cargo test --workspace` **59 green, native-free** (`cargo tree -p doctree-tauri` shows no `momusdev`/`llama`); gated `cargo check -p doctree-tauri --features llm` and `cargo test --no-run --features llm` compile clean under MSVC (proves `Engine: Send+Sync` for managed state, the `spawn_blocking` async-command wiring, and that the round-trip test binary builds). The command lazily loads the model on first call and offloads inference to a blocking thread so the webview never stalls.
+  Note: the **live model load** (2.33 GB qwen3-4b on CPU) + the GBNF grammar-compile check are the user's desktop end test — the Tauri window cannot be launched/exercised in this headless env (as with A8). Run with `set DOCTREE_MODEL_PATH=…\qwen3-4b-q4km.gguf` then `cargo test -p doctree-tauri --features llm -- --ignored --nocapture`.
 
 ---
 
