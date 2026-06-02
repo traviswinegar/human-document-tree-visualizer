@@ -130,6 +130,31 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
   .cooldownTime(12000)
   .warmupTicks(0);
 
+// --- Keep the final layout open (don't collapse the snakes into a ball) ----
+// A force-directed graph relaxes toward its minimum-energy shape. With d3's
+// default charge (-30) the structural spine — a long `precedes` chain of
+// sentences plus its branching sections/clauses — coils up into one dense ball
+// the moment the build stops reheating the sim. The lovely snaking / looping
+// filaments you see *during* formation are that same chain before repulsion has
+// spread it out. So crank the node-node repulsion (and give edges a little more
+// resting room) to make the *equilibrium itself* open and filamentary: the shape
+// that grows is the shape that stays. `distanceMax` caps the repulsion range so
+// the graph opens up without exploding off-screen. These are the tuning knobs —
+// more-negative CHARGE_STRENGTH or larger LINK_DISTANCE = more spread.
+const CHARGE_STRENGTH = -90; // node-node repulsion (was d3 default -30)
+const CHARGE_MAX_DISTANCE = 600; // beyond this, nodes stop repelling (keeps it from exploding)
+const LINK_DISTANCE = 40; // resting edge length (was d3 default ~30)
+type ForceTunable = {
+  strength?(v: number): unknown;
+  distanceMax?(v: number): unknown;
+  distance?(v: number): unknown;
+};
+const chargeForce = graph.d3Force("charge") as ForceTunable | undefined;
+chargeForce?.strength?.(CHARGE_STRENGTH);
+chargeForce?.distanceMax?.(CHARGE_MAX_DISTANCE);
+const linkForce = graph.d3Force("link") as ForceTunable | undefined;
+linkForce?.distance?.(LINK_DISTANCE);
+
 // --- Bloom glow ------------------------------------------------------------
 // The single biggest "the graph is so dark" lever: an UnrealBloom pass makes the
 // bright node spheres bleed light against the near-black background, so the graph
@@ -139,10 +164,13 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
 // space *before* that). The ESM 3d-force-graph externalises `three`, so these
 // addon passes share the one `three` instance the composer renders with.
 // Tunables — bump STRENGTH for more glow, lower THRESHOLD to make dimmer nodes
-// (and edges) bloom too:
-const BLOOM_STRENGTH = 0.4; // intensity of the glow — restrained, so spheres keep their shape
-const BLOOM_RADIUS = 0.3; // how tightly the glow hugs the node (smaller = tighter halo)
-const BLOOM_THRESHOLD = 0.2; // only pixels brighter than this bloom — keeps it a rim, not a blowout
+// (and edges) bloom too. Kept deliberately low: on a dense graph the glow of
+// hundreds of overlapping spheres *accumulates* into a washed-out haze in the
+// crowded centre, so the robust base palette (colors.ts) does the heavy lifting
+// and bloom is just a faint rim on the brightest cores.
+const BLOOM_STRENGTH = 0.18; // intensity of the glow — subtle accent, not the main event
+const BLOOM_RADIUS = 0.2; // how tightly the glow hugs the node (smaller = tighter halo)
+const BLOOM_THRESHOLD = 0.35; // only the brightest cores bloom — keeps the dense centre defined, not hazy
 const bloomPass = new UnrealBloomPass(
   new Vector2(window.innerWidth, window.innerHeight),
   BLOOM_STRENGTH,

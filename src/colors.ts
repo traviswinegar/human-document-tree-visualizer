@@ -2,30 +2,29 @@ import type { NodeKind, EdgeKind } from "./types";
 
 // Color-by-type palette. Two temperature families keep "color-by-provenance"
 // readable at a glance: the deterministic spine spans the *cool* arc of the wheel
-// (violet → indigo → azure → cyan → teal), the LLM-inferred semantic overlay the
-// *warm* arc (red → orange → gold) plus a few vivid outliers. Every hue is high
-// in lightness + saturation so nodes glow against the near-black background and
-// stay distinct in a dense graph — the old palette was all muddy navy, which
-// vanished as the graph grew (and the browser/WASM walk shows *only* the
-// structural kinds, so those have to carry the whole picture on their own).
-// These bright base colors also feed the bloom pass in main.ts: a brighter sphere
-// clears the bloom threshold and picks up the glow.
+// (violet → indigo → blue → sky → cyan → teal), the LLM-inferred semantic overlay
+// the *warm* arc (red → orange → gold) plus a few vivid outliers. These are
+// *robust*, fully-saturated jewel tones (Tailwind 500/600 level), not the earlier
+// pastel/luminous set — they hold their identity on their own, so the graph reads
+// as bold color even with the bloom dialed almost off. Each hue is well-separated
+// from its neighbours so a dense cloud stays legible (and the browser/WASM walk
+// shows *only* the structural kinds, so those seven have to carry the picture).
 const NODE_COLORS: Record<NodeKind, string> = {
-  // structural — the cool arc, bright + spread so the spine reads colorful
-  section: "#4f9dff", // azure — big anchor nodes
-  paragraph: "#22d3ee", // cyan
-  sentence: "#38bdf8", // sky — the dominant kind; luminous so the cloud isn't navy mud
-  clause: "#818cf8", // indigo
-  quote: "#2dd4bf", // teal
-  reference: "#9fb3d9", // light slate — meta, intentionally the quietest
-  term: "#a78bfa", // violet
+  // structural — the cool arc, deep + saturated, spread across the cool wheel
+  term: "#8b5cf6", // violet
+  clause: "#6366f1", // indigo
+  section: "#2563eb", // bold blue — big anchor nodes
+  sentence: "#0ea5e9", // sky — the dominant kind
+  paragraph: "#06b6d4", // cyan
+  quote: "#14b8a6", // teal
+  reference: "#64748b", // slate — meta, intentionally the quietest
   // semantic — the warm arc + vivid outliers, each clearly distinct
-  character: "#ff5d5d", // red
-  place: "#ffa53c", // orange
+  character: "#ef4444", // red
+  place: "#f97316", // orange
+  event: "#f59e0b", // amber/gold
   concept: "#d946ef", // fuchsia
-  event: "#ffd93d", // gold
-  object: "#4ade80", // lime green
-  group: "#f472b6", // pink
+  object: "#22c55e", // green
+  group: "#ec4899", // rose/pink
 };
 
 const NODE_SIZE: Record<NodeKind, number> = {
