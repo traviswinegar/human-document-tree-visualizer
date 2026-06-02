@@ -18,8 +18,12 @@ llm = ["dep:momusdev_llm", "momusdev_llm/inference"]
 # llama-cpp-2 feature. Pick at most one per build (mutually exclusive at link).
 cuda = ["llm", "momusdev_llm/cuda"]
 vulkan = ["llm", "momusdev_llm/vulkan"]
-# Embeddings + LanceDB vector store (heavy: ort/ONNX, aws-lc). For B4.
-vectordb = ["llm", "momusdev_llm/vectordb"]
+# Embeddings (all-MiniLM-L6-v2 via fastembed/ONNX) for similarity edges + search
+# (B4). Independent of `llm`: this turns on the embedder (downloaded ORT binary,
+# no C++ toolchain) WITHOUT compiling llama.cpp, so a build can do embeddings
+# alone, inference alone, or both. Heavy deps (lancedb/arrow/fastembed) but no
+# native compiler beyond what `cargo` links.
+vectordb = ["dep:momusdev_llm", "momusdev_llm/vectordb"]
 
 [dependencies]
 doctree-core = { path = "../doctree-core" }

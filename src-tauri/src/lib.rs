@@ -76,19 +76,23 @@ fn build_steps(text: String, params: Option<WalkParams>) -> Vec<BuildStep> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
-    // The lazily-loaded inference engine only exists (and only needs managing)
-    // under the `llm` feature; the default build manages nothing native.
-    #[cfg(feature = "llm")]
+    // The lazily-loaded native models (inference engine under `llm`, embedder
+    // under `vectordb`) only exist — and only need managing — when a feature
+    // turns them on; the default build manages nothing native.
+    #[cfg(any(feature = "llm", feature = "vectordb"))]
     let builder = builder.manage(llm::LlmState::default());
     builder
-        // `llm_status`/`llm_complete` are registered on every build; only their
-        // engine is feature-gated, so the frontend's IPC surface is stable.
+        // Every command is registered on every build; only their native model
+        // is feature-gated (the others resolve to actionable-error stubs), so
+        // the frontend's IPC surface stays stable regardless of how it was built.
         .invoke_handler(tauri::generate_handler![
             walk_document,
             build_steps,
             llm::llm_status,
             llm::llm_complete,
-            llm::semantic_build_steps
+            llm::semantic_build_steps,
+            llm::embedded_build_steps,
+            llm::semantic_search
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

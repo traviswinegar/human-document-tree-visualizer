@@ -24,6 +24,11 @@ llm = ["doctree-llm/llm"]
 # MSVC 14.50). Kept wired so a fixed toolchain is a one-flag rebuild.
 cuda = ["llm", "doctree-llm/cuda"]
 vulkan = ["llm", "doctree-llm/vulkan"]
+# Embeddings (similarity edges + semantic search, B4). Lights up the gated
+# embedder commands in `src/llm.rs`. Independent of `llm`: it does NOT compile
+# llama.cpp — fastembed downloads a prebuilt ONNX runtime, so this builds without
+# a C++ toolchain. Combine with `llm` for similarity over the full hybrid graph.
+vectordb = ["doctree-llm/vectordb"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

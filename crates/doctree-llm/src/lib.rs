@@ -95,6 +95,205 @@ DOCUMENT (each line is prefixed with its anchor id):\n{body}"
     )
 }
 
+// ---------------------------------------------------------------------------
+// Embedding similarity (B4) — pure, native-free.
+//
+// The embedding *model* needs a native build (fastembed/ONNX, behind the
+// `vectordb` feature), but everything that turns embedding vectors into graph
+// structure — cosine similarity, top-k neighbour selection, query ranking — is
+// plain arithmetic. Keeping it native-free means the real B4 logic is exercised
+// by the default `cargo test`, exactly like `build_extraction_prompt` (B3); the
+// gated `Embedder` only supplies the vectors.
+// ---------------------------------------------------------------------------
+
+/// Environment variable pointing at the on-disk cache for the embedding model
+/// (the all-MiniLM-L6-v2 ONNX files). If unset, [`embed_cache_dir`] falls back
+/// to a stable per-user temp directory; pre-populate it for fully offline use.
+pub const EMBED_CACHE_ENV: &str = "DOCTREE_EMBED_CACHE";
+
+/// Resolve the embedding-model cache directory: the [`EMBED_CACHE_ENV`] env var
+/// if set and non-empty, else a stable per-user temp subdirectory. Native-free,
+/// so the Tauri layer can name the cache location without the `vectordb` build.
+pub fn embed_cache_dir() -> String {
+    std::env::var(EMBED_CACHE_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join("doctree-embed-cache")
+                .to_string_lossy()
+                .into_owned()
+        })
+}
+
+/// Tunables for deriving [`doctree_core::EdgeKind::SimilarTo`] edges from node
+/// embeddings.
+#[derive(Debug, Clone, Copy)]
+pub struct SimilarityOptions {
+    /// Minimum cosine similarity for an edge to be considered (in `[-1, 1]`).
+    pub min_similarity: f32,
+    /// Cap on neighbours kept per node (its strongest `top_k`). Bounds the edge
+    /// count to ~`top_k · n` instead of `n²`, so the graph stays legible.
+    pub top_k: usize,
+}
+
+impl Default for SimilarityOptions {
+    fn default() -> Self {
+        // all-MiniLM-L6-v2 puts unrelated text around 0.2–0.4 and clearly
+        // related text at 0.6+, so 0.6 keeps only meaningful links; four
+        // neighbours per node shows clusters without hairballing.
+        Self {
+            min_similarity: 0.6,
+            top_k: 4,
+        }
+    }
+}
+
+/// Cosine similarity of two equal-length vectors. Returns `0.0` for a length
+/// mismatch, an empty input, or a zero-magnitude vector (no direction ⇒ no
+/// similarity) — so it never yields `NaN`.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.is_empty() || a.len() != b.len() {
+        return 0.0;
+    }
+    let mut dot = 0.0f32;
+    let mut na = 0.0f32;
+    let mut nb = 0.0f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+/// One semantic-search result: a node id and its cosine similarity to the query.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchHit {
+    pub id: String,
+    pub score: f32,
+}
+
+/// Rank embedded nodes by cosine similarity to `query`, best first, keeping at
+/// most `top_k`. Ties break by id so the ordering is deterministic. Pure.
+pub fn rank_by_similarity(
+    query: &[f32],
+    embedded: &[(String, Vec<f32>)],
+    top_k: usize,
+) -> Vec<SearchHit> {
+    let mut hits: Vec<SearchHit> = embedded
+        .iter()
+        .map(|(id, v)| SearchHit {
+            id: id.clone(),
+            score: cosine_similarity(query, v),
+        })
+        .collect();
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    hits.truncate(top_k);
+    hits
+}
+
+/// Which node kinds carry enough standalone meaning to embed. Structural
+/// sub-units (paragraph/clause/quote/reference) are skipped — they are spans of
+/// their parent sentence and only add noise to similarity. Sections, sentences,
+/// salient terms, and every semantic entity are embedded.
+pub fn is_embeddable_kind(kind: doctree_core::NodeKind) -> bool {
+    use doctree_core::NodeKind;
+    matches!(
+        kind,
+        NodeKind::Section | NodeKind::Sentence | NodeKind::Term
+    ) || kind.is_semantic()
+}
+
+/// The `(id, text)` pairs to embed for a graph, in node order. A node's text is
+/// its span `text` when present (sentences/sections), else its `label` (terms
+/// and semantic entities). Nodes whose resolved text is empty are skipped. Pure
+/// and deterministic, so the gated embedder only has to turn strings into
+/// vectors.
+pub fn graph_embedding_inputs(graph: &doctree_core::Graph) -> Vec<(String, String)> {
+    graph
+        .nodes
+        .iter()
+        .filter(|n| is_embeddable_kind(n.kind))
+        .filter_map(|n| {
+            let text = n
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| n.label.trim());
+            (!text.is_empty()).then(|| (n.id.clone(), text.to_string()))
+        })
+        .collect()
+}
+
+/// Derive undirected [`doctree_core::EdgeKind::SimilarTo`] edges (provenance
+/// [`doctree_core::Provenance::Embedding`]) from node embeddings.
+///
+/// For each node only its strongest `top_k` neighbours above `min_similarity`
+/// are kept; an edge survives if it is in *either* endpoint's top-k, so a
+/// mutually-strong pair is emitted exactly once. Each edge is weighted by the
+/// pair's cosine similarity. Output is sorted by `(source, target)` for a stable
+/// ordering. Pure — it takes vectors and returns graph edges, no model.
+pub fn similarity_edges(
+    embedded: &[(String, Vec<f32>)],
+    opts: &SimilarityOptions,
+) -> Vec<doctree_core::Edge> {
+    use doctree_core::{Edge, EdgeKind, Provenance};
+    use std::collections::BTreeSet;
+
+    let n = embedded.len();
+    // Candidate neighbours per node: (similarity, other-index), only above the
+    // threshold. Built once over the upper triangle, mirrored to both nodes.
+    let mut per_node: Vec<Vec<(f32, usize)>> = vec![Vec::new(); n];
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let s = cosine_similarity(&embedded[i].1, &embedded[j].1);
+            if s >= opts.min_similarity {
+                per_node[i].push((s, j));
+                per_node[j].push((s, i));
+            }
+        }
+    }
+
+    // Keep each node's strongest `top_k`; union the surviving index pairs.
+    let mut kept: BTreeSet<(usize, usize)> = BTreeSet::new();
+    for (i, cands) in per_node.iter_mut().enumerate() {
+        cands.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.1.cmp(&b.1))
+        });
+        for (_, j) in cands.iter().take(opts.top_k) {
+            kept.insert(if i < *j { (i, *j) } else { (*j, i) });
+        }
+    }
+
+    let mut edges: Vec<Edge> = kept
+        .into_iter()
+        .map(|(lo, hi)| {
+            let s = cosine_similarity(&embedded[lo].1, &embedded[hi].1);
+            Edge::new(
+                embedded[lo].0.clone(),
+                embedded[hi].0.clone(),
+                EdgeKind::SimilarTo,
+                Provenance::Embedding,
+            )
+            .with_weight(s)
+        })
+        .collect();
+    edges.sort_by(|a, b| a.source.cmp(&b.source).then(a.target.cmp(&b.target)));
+    edges
+}
+
 /// Configuration for loading a local GGUF model.
 ///
 /// Native-free: this struct and its builders exist regardless of the `llm`
@@ -253,6 +452,59 @@ mod engine {
 #[cfg(feature = "llm")]
 pub use engine::Engine;
 
+// ---------------------------------------------------------------------------
+// Native embedder — only compiled under the `vectordb` feature (fastembed/ONNX).
+// Independent of `llm`: a build can embed (for similarity edges + search)
+// without compiling llama.cpp, and vice-versa.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "vectordb")]
+mod embedder {
+    use anyhow::{Context, Result};
+    use momusdev_llm::embeddings::{EmbedText, FastEmbedder};
+
+    /// A loaded sentence-embedding model (all-MiniLM-L6-v2 via fastembed/ONNX),
+    /// wrapping momusdev_llm's [`FastEmbedder`]. Maps the embedder's errors into
+    /// this crate's `anyhow` surface and keeps the sibling type out of the public
+    /// API. Send+Sync (the inner model sits behind a `Mutex`), so it lives
+    /// happily in Tauri's managed state.
+    pub struct Embedder {
+        inner: FastEmbedder,
+    }
+
+    impl Embedder {
+        /// Load the embedding model, caching its ONNX files under `cache_dir`.
+        /// CPU-bound — and network-bound on the very first run if the model
+        /// isn't cached yet — so call it from `spawn_blocking`.
+        pub fn load(cache_dir: &str) -> Result<Self> {
+            let inner = FastEmbedder::new(cache_dir)
+                .with_context(|| format!("loading embedding model (cache dir: {cache_dir})"))?;
+            Ok(Self { inner })
+        }
+
+        /// Embed a batch of texts; one vector per input, in order.
+        pub fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+            self.inner.embed(texts)
+        }
+
+        /// Embed a single text into its vector.
+        pub fn embed_one(&self, text: &str) -> Result<Vec<f32>> {
+            self.inner
+                .embed(vec![text.to_string()])?
+                .pop()
+                .context("embedder returned no vector for the query")
+        }
+
+        /// Output dimensionality (384 for MiniLM-L6-v2).
+        pub fn dimension(&self) -> usize {
+            self.inner.dimension()
+        }
+    }
+}
+
+#[cfg(feature = "vectordb")]
+pub use embedder::Embedder;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +614,115 @@ mod tests {
             "prompt should be bounded by the budget, got {} bytes",
             p.len()
         );
+    }
+
+    #[test]
+    fn cosine_similarity_handles_identical_orthogonal_and_degenerate() {
+        // Identical direction → 1, orthogonal → 0, opposite → -1.
+        assert!((cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < 1e-6);
+        assert!(cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
+        assert!((cosine_similarity(&[1.0, 0.0], &[-1.0, 0.0]) + 1.0).abs() < 1e-6);
+        // Magnitude is normalised out: a longer parallel vector is still 1.
+        assert!((cosine_similarity(&[1.0, 0.0], &[5.0, 0.0]) - 1.0).abs() < 1e-6);
+        // Degenerate inputs never NaN: zero vector, empty, length mismatch → 0.
+        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 0.0]), 0.0);
+        assert_eq!(cosine_similarity(&[], &[]), 0.0);
+        assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0]), 0.0);
+    }
+
+    #[test]
+    fn rank_by_similarity_orders_best_first_and_truncates() {
+        let embedded = vec![
+            ("a".to_string(), vec![1.0, 0.0]),  // exact match
+            ("b".to_string(), vec![0.0, 1.0]),  // orthogonal
+            ("c".to_string(), vec![1.0, 1.0]),  // 45° → ~0.707
+        ];
+        let hits = rank_by_similarity(&[1.0, 0.0], &embedded, 2);
+        assert_eq!(hits.len(), 2, "truncated to top_k");
+        assert_eq!(hits[0].id, "a");
+        assert_eq!(hits[1].id, "c");
+        assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn similarity_edges_link_only_pairs_above_threshold() {
+        // a≈b (near-parallel), c orthogonal to both.
+        let embedded = vec![
+            ("a".to_string(), vec![1.0, 0.0, 0.0]),
+            ("b".to_string(), vec![0.9, 0.1, 0.0]),
+            ("c".to_string(), vec![0.0, 0.0, 1.0]),
+        ];
+        let edges = similarity_edges(&embedded, &SimilarityOptions::default());
+        assert_eq!(edges.len(), 1, "only the a–b pair clears 0.6");
+        let e = &edges[0];
+        assert_eq!((e.source.as_str(), e.target.as_str()), ("a", "b"));
+        assert_eq!(e.kind, doctree_core::EdgeKind::SimilarTo);
+        assert_eq!(e.provenance, doctree_core::Provenance::Embedding);
+        assert!(e.weight.unwrap() > 0.9, "weighted by cosine similarity");
+    }
+
+    #[test]
+    fn similarity_edges_respect_top_k() {
+        // Three vectors at 0°, 10°, 20° — all pairwise above 0.6, but a–c is the
+        // weakest pair. With top_k = 1 each node keeps only its single strongest
+        // neighbour, so a–c is dropped; a–b and b–c survive.
+        let embedded = vec![
+            ("a".to_string(), vec![1.0, 0.0]),
+            ("b".to_string(), vec![0.9848, 0.1736]),
+            ("c".to_string(), vec![0.9397, 0.3420]),
+        ];
+        let opts = SimilarityOptions {
+            min_similarity: 0.6,
+            top_k: 1,
+        };
+        let edges = similarity_edges(&embedded, &opts);
+        assert_eq!(edges.len(), 2, "top_k=1 drops the weakest (a–c) pair");
+        assert!(
+            !edges
+                .iter()
+                .any(|e| e.source == "a" && e.target == "c"),
+            "a–c is the weakest and must be pruned"
+        );
+        // With a generous top_k all three pairs come back.
+        let all = similarity_edges(&embedded, &SimilarityOptions { min_similarity: 0.6, top_k: 8 });
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn graph_embedding_inputs_selects_content_nodes() {
+        use doctree_core::{Graph, Node, NodeKind, Span};
+        let mut g = Graph::new();
+        g.push_node(
+            Node::structural("sec:1", NodeKind::Section, "The Cove")
+                .with_text("The Cove")
+                .with_span(Span::new(0, 8)),
+        );
+        g.push_node(
+            Node::structural("sent:1", NodeKind::Sentence, "Mara met Vane.")
+                .with_text("Mara met Vane.")
+                .with_span(Span::new(9, 23)),
+        );
+        g.push_node(Node::structural("term:cove", NodeKind::Term, "cove")); // label only
+        g.push_node(Node::semantic("char:mara", NodeKind::Character, "Mara")); // label only
+        // Excluded structural sub-units (no usable standalone meaning):
+        g.push_node(Node::structural("para:1", NodeKind::Paragraph, "para"));
+        g.push_node(Node::structural("clause:1.1", NodeKind::Clause, "Mara met Vane"));
+
+        let inputs = graph_embedding_inputs(&g);
+        let ids: Vec<&str> = inputs.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["sec:1", "sent:1", "term:cove", "char:mara"]);
+        // Sentence uses its span text; term/character fall back to the label.
+        assert_eq!(inputs[1].1, "Mara met Vane.");
+        assert_eq!(inputs[2].1, "cove");
+        assert_eq!(inputs[3].1, "Mara");
+    }
+
+    #[test]
+    fn embed_cache_dir_prefers_the_env_var() {
+        // Default (env unset) is a non-empty path under temp.
+        if std::env::var(EMBED_CACHE_ENV).is_err() {
+            assert!(embed_cache_dir().contains("doctree-embed-cache"));
+        }
     }
 
     #[test]
