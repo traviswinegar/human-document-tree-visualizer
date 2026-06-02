@@ -10,6 +10,7 @@
 pub mod build;
 pub mod classify;
 pub mod grammar;
+pub mod metrics;
 pub mod schema;
 pub mod walker;
 
@@ -18,6 +19,9 @@ pub use classify::{
     classify_document, Classification, ClassificationSignals, DocumentClass, RecommendedPipeline,
 };
 pub use grammar::{graph_grammar, lint_gbnf, GRAPH_GBNF};
+pub use metrics::{
+    compare_pipelines, graph_metrics, GraphMetrics, PipelineComparison, PipelineRun,
+};
 pub use schema::{Edge, EdgeKind, Graph, Node, NodeKind, Provenance, Span};
 pub use walker::{walk, walk_with, WalkOptions};
 

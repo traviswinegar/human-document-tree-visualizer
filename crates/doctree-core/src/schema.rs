@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 /// What a node represents. Serializes to a stable snake_case tag that the GBNF
 /// grammar enumerates verbatim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
     // --- structural (deterministic spine) ---
@@ -75,7 +75,7 @@ impl NodeKind {
 
 /// How two nodes relate. Serializes to a stable snake_case tag enumerated by the
 /// GBNF grammar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeKind {
     /// Containment in the structural hierarchy (clause ∈ sentence ∈ paragraph …).
@@ -104,7 +104,7 @@ pub enum EdgeKind {
 
 /// Which layer produced an element — drives frontend coloring (deterministic
 /// spine vs inferred semantics vs embedding).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provenance {
     /// Deterministic structure walker.
