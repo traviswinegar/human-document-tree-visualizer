@@ -1,6 +1,6 @@
 import ForceGraph3D from "3d-force-graph";
 import type { NodeObject, LinkObject } from "3d-force-graph";
-import type { GraphNode, GraphEdge } from "./types";
+import type { GraphNode, GraphEdge, NodeKind, Provenance } from "./types";
 import { nodeColor, nodeSize, edgeColor } from "./colors";
 import { buildSequence, createBuildPlayer, type BuildPlayer } from "./build-player";
 import { loadBuildSource, type BuildSource } from "./doc-source";
@@ -39,6 +39,7 @@ const speedEl = document.getElementById("speed") as HTMLInputElement;
 const sidebarDocEl = document.getElementById("sidebar-doc")!;
 const sidebarCollapseEl = document.getElementById("sidebar-collapse") as HTMLButtonElement;
 const sidebarReopenEl = document.getElementById("sidebar-reopen") as HTMLButtonElement;
+const nodeDetailsEl = document.getElementById("node-details")!;
 
 // Search/highlight state. When a search is active, matched nodes keep full color
 // and the rest dim out, so a query reads as "light up the matches" against the
@@ -158,6 +159,15 @@ function selectNode(node: NodeObject): void {
   }
   refresh();
   focusNode(node);
+  jumpToNode(id); // D4 — light up its line(s) in the sidebar…
+  showDetails(asNode(node)); // …and surface its details
+}
+
+// Select by id — used by the sidebar text and the details-panel connections so
+// the document and the graph stay two views of the same selection.
+function selectNodeById(id: string): void {
+  const ro = graph.graphData().nodes.find((x) => asNode(x).id === id);
+  if (ro) selectNode(ro);
 }
 
 // Drop the selection highlight (background click / Escape / new build).
@@ -165,6 +175,8 @@ function clearSelection(): void {
   if (selectedId === null) return;
   selectedId = null;
   neighborIds.clear();
+  hideDetails();
+  clearDocActive();
   refresh();
 }
 
@@ -246,6 +258,132 @@ function setSidebar(open: boolean): void {
   graph.zoomToFit(600, 80);
 }
 
+// --- D4: jump-to-text + node details panel ----------------------------------
+function clearDocActive(): void {
+  sidebarDocEl
+    .querySelectorAll(".doc-active")
+    .forEach((el) => el.classList.remove("doc-active"));
+}
+
+// Light up (and scroll to) the clicked node's line in the sidebar. Sentences and
+// headings have their own line; everything else (paragraphs, clauses/quotes/
+// refs, terms, and — once the LLM layer lands — entities) has no line of its
+// own, so we highlight the sentences it connects to instead, sentences first.
+function jumpToNode(id: string): void {
+  clearDocActive();
+  const targets: Element[] = [];
+  const own = sidebarDocEl.querySelector(`[data-node-id="${id}"]`);
+  if (own) {
+    targets.push(own);
+  } else {
+    const bySentenceFirst = [...neighborIds].sort(
+      (a, b) => (a.startsWith("sent:") ? 0 : 1) - (b.startsWith("sent:") ? 0 : 1)
+    );
+    for (const nid of bySentenceFirst) {
+      const el = sidebarDocEl.querySelector(`[data-node-id="${nid}"]`);
+      if (el) targets.push(el);
+    }
+  }
+  if (targets.length === 0) return;
+  for (const el of targets) el.classList.add("doc-active");
+  targets[0].scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+const PROV_META: Record<Provenance, { dot: string; text: string }> = {
+  structural: { dot: "#5f7fbf", text: "structural · deterministic walk" },
+  semantic: { dot: "#ff6b6b", text: "semantic · LLM-inferred" },
+  embedding: { dot: "#06d6a0", text: "embedding · similarity" },
+};
+
+// Populate the details panel: kind chip, label, provenance, the node's own text
+// (if it adds anything beyond the label), and its connections grouped by edge
+// kind + direction. Each connection is clickable to navigate the selection.
+function showDetails(node: GraphNode): void {
+  const nodesById = new Map<string, GraphNode>();
+  for (const ro of graph.graphData().nodes) {
+    const n = asNode(ro);
+    nodesById.set(n.id, n);
+  }
+
+  type Conn = { id: string; label: string; kind: NodeKind };
+  const groups = new Map<string, Conn[]>();
+  for (const l of graph.graphData().links) {
+    const e = asLink(l);
+    const s = idOf(e.source);
+    const t = idOf(e.target);
+    let otherId: string | null = null;
+    let arrow = "";
+    if (s === node.id) {
+      otherId = t;
+      arrow = "→";
+    } else if (t === node.id) {
+      otherId = s;
+      arrow = "←";
+    }
+    if (otherId === null) continue;
+    const other = nodesById.get(otherId);
+    if (!other) continue;
+    const key = `${e.kind} ${arrow}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push({ id: other.id, label: other.label, kind: other.kind });
+  }
+
+  const prov = PROV_META[node.provenance] ?? PROV_META.structural;
+  let html = "";
+  html += `<div class="nd-head">`;
+  html += `<span class="nd-kind" style="background:${nodeColor(node.kind)}">${esc(node.kind)}</span>`;
+  html += `<span class="nd-label">${esc(node.label)}</span>`;
+  html += `<button id="node-details-close" type="button" title="Close (Esc)" aria-label="Close">×</button>`;
+  html += `</div>`;
+  html += `<div class="nd-prov"><span class="dot" style="background:${prov.dot}"></span>${esc(prov.text)}</div>`;
+  if (node.text && node.text !== node.label) {
+    html += `<div class="nd-text">${esc(node.text)}</div>`;
+  }
+  for (const key of [...groups.keys()].sort()) {
+    const conns = groups.get(key)!;
+    html += `<div class="nd-conn-group"><div class="nd-conn-kind">${esc(key)} (${conns.length})</div>`;
+    const seen = new Set<string>();
+    let shown = 0;
+    for (const c of conns) {
+      if (seen.has(c.id)) continue;
+      seen.add(c.id);
+      if (shown >= 40) {
+        html += `<span class="nd-conn-kind">…</span>`;
+        break;
+      }
+      html += `<span class="nd-conn" data-node-id="${esc(c.id)}"><span class="swatch" style="background:${nodeColor(c.kind)}"></span>${esc(c.label)}</span>`;
+      shown += 1;
+    }
+    html += `</div>`;
+  }
+
+  nodeDetailsEl.innerHTML = html;
+  nodeDetailsEl.classList.remove("hidden");
+}
+
+function hideDetails(): void {
+  nodeDetailsEl.classList.add("hidden");
+  nodeDetailsEl.innerHTML = "";
+}
+
+// Two-way wiring: clicking a sentence/heading in the document selects its node;
+// clicking a connection in the details panel navigates to that node; the close
+// button drops the selection. Delegated once on the containers (their innards
+// are rebuilt on every render/selection).
+sidebarDocEl.addEventListener("click", (e) => {
+  const el = (e.target as HTMLElement).closest("[data-node-id]");
+  if (el) selectNodeById(el.getAttribute("data-node-id")!);
+});
+nodeDetailsEl.addEventListener("click", (e) => {
+  const target = e.target as HTMLElement;
+  if (target.closest("#node-details-close")) {
+    clearSelection();
+    return;
+  }
+  const conn = target.closest(".nd-conn");
+  if (conn) selectNodeById(conn.getAttribute("data-node-id")!);
+});
+
 function runSearch(): void {
   const q = searchEl.value.trim().toLowerCase();
   searchActive = q.length > 0;
@@ -278,6 +416,8 @@ function resetView(): void {
   searchCountEl.textContent = "";
   selectedId = null;
   neighborIds.clear();
+  hideDetails();
+  clearDocActive();
   refresh();
   graph.zoomToFit(800, 60);
 }
@@ -360,6 +500,7 @@ function clearSearch(): void {
   searchCountEl.textContent = "";
   selectedId = null;
   neighborIds.clear();
+  hideDetails();
   refresh();
 }
 
