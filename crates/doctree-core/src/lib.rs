@@ -7,8 +7,10 @@
 //! or GPU dependencies, so `cargo test -p doctree-core` runs anywhere — that
 //! decoupling is the load-bearing invariant from ADR-0001.
 
+pub mod grammar;
 pub mod schema;
 
+pub use grammar::{graph_grammar, lint_gbnf, GRAPH_GBNF};
 pub use schema::{Edge, EdgeKind, Graph, Node, NodeKind, Provenance, Span};
 
 /// Crate name surfaced for diagnostics / the engine-health command.
