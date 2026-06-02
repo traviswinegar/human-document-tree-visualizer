@@ -72,6 +72,20 @@
       #stats-meta .meta {
         opacity: 0.8;
       }
+      /* Phase 5 #1 — live elapsed-time readout. Sits at the top of the meta
+         block so a slow walk / semantic pass reads as active work (the number
+         keeps ticking), then freezes at the total when the build settles.
+         Tabular figures so the width doesn't jitter as it counts. */
+      #elapsed {
+        opacity: 1;
+        color: #7aa2ff;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+        margin-bottom: 1px;
+      }
+      #elapsed.running {
+        color: #8ad0a8; /* green while work is in flight; cools to blue on freeze */
+      }
       #stats-collapse,
       #stats-reopen {
         font: inherit;
@@ -650,6 +664,7 @@
         <button id="stats-collapse" type="button" title="Hide analysis" aria-label="Hide analysis">‹</button>
       </div>
       <div id="stats-meta">
+        <div class="meta" id="elapsed"></div>
         <div class="meta" id="stats">loading…</div>
         <div class="meta" id="routing"></div>
         <div class="meta hidden" id="semantic-status"></div>

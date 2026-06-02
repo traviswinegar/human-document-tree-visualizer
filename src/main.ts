@@ -34,6 +34,7 @@ const withAlpha = (hex: string, a: number): string => {
 
 const container = document.getElementById("graph")!;
 const statsEl = document.getElementById("stats")!;
+const elapsedEl = document.getElementById("elapsed")!;
 const statsBodyEl = document.getElementById("stats-body")!;
 const statsCollapseEl = document.getElementById("stats-collapse") as HTMLButtonElement;
 const statsReopenEl = document.getElementById("stats-reopen") as HTMLButtonElement;
@@ -920,10 +921,55 @@ function clearSearch(): void {
   refresh();
 }
 
+// --- Phase 5 #1: clear-on-open + live elapsed timer -------------------------
+// A slow desktop semantic walk runs tens of seconds to minutes on a large doc
+// (the user's 650 KB novel). Without feedback the wait reads as a hang, so a
+// readout in the left rail ticks from the instant a document is opened, through
+// walk → build → semantic-weave, then freezes at the total. It starts in
+// loadAndBuild *before* the await on the walk (so it counts the walk itself) and
+// stops on the structural `done`, or — when a slow model-backed delta is in
+// flight — in that delta's `.finally` (the genuinely slow CPU phase). A 100 ms
+// tick is smooth enough to read as live without burdening the render loop.
+let elapsedStart = 0;
+let elapsedTimer: number | null = null;
+
+function fmtElapsed(ms: number): string {
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s % 60);
+  return `${m}m ${rem.toString().padStart(2, "0")}s`;
+}
+
+function startElapsed(): void {
+  elapsedStart = performance.now();
+  if (elapsedTimer !== null) window.clearInterval(elapsedTimer);
+  elapsedEl.classList.add("running");
+  const tick = (): void => {
+    elapsedEl.textContent = `⏱ ${fmtElapsed(performance.now() - elapsedStart)}`;
+  };
+  tick();
+  elapsedTimer = window.setInterval(tick, 100);
+}
+
+function stopElapsed(): void {
+  if (elapsedTimer !== null) {
+    window.clearInterval(elapsedTimer);
+    elapsedTimer = null;
+  }
+  elapsedEl.classList.remove("running");
+  // Freeze at the final total (one last read so the displayed value is exact).
+  elapsedEl.textContent = `⏱ ${fmtElapsed(performance.now() - elapsedStart)}`;
+}
+
 // Tear down any running build and stream a fresh one from `source`. Everything
 // that differs per-document (counts, sequence, dev handles) flows from here, so
 // the upload and drag-drop paths converge on this one function.
 function startBuild(source: BuildSource): void {
+  // When a slow model-backed delta is pending, the elapsed timer keeps running
+  // past the structural `done` and stops only when that delta settles (below);
+  // on the pure structural path it stops on `done`.
+  const hasPendingDelta = Boolean(source.pendingDelta);
   player?.pause();
   cancelPendingApply?.(); // drop any trailing apply still queued from the old build
   cancelPendingApply = null;
@@ -1015,6 +1061,9 @@ function startBuild(source: BuildSource): void {
         flushApply(); // make sure the final batch is on screen before framing it
         graph.zoomToFit(800, 80);
         lastFitAt = now;
+        // Pure structural path: this is the total. (When a model-backed delta is
+        // pending the timer keeps running and freezes in that delta's .finally.)
+        if (!hasPendingDelta) stopElapsed();
       } else if (now - lastFitAt > 250) {
         graph.zoomToFit(500, 80);
         lastFitAt = now;
@@ -1050,7 +1099,12 @@ function startBuild(source: BuildSource): void {
       })
       .catch((err) => console.error("semantic delta failed:", err))
       .finally(() => {
-        if (player === p) setSemanticPending(false);
+        // Only freeze the timer if we're still the live build — a newer document
+        // opened mid-extraction owns the timer now and must keep ticking.
+        if (player === p) {
+          setSemanticPending(false);
+          stopElapsed(); // the slow CPU phase is done — this is the real total
+        }
       });
   }
 
@@ -1078,6 +1132,22 @@ function startBuild(source: BuildSource): void {
 // Resolve the walk for `text` (or the bundled default), then build. Walking can
 // be slow on a big document, so we surface a "walking…" state before the await.
 async function loadAndBuild(text?: string, label?: string): Promise<void> {
+  // Phase 5 #1 — clear the previous document the *instant* a new one is opened,
+  // and start the elapsed timer here (before the await) so it counts the walk
+  // itself. Otherwise the old graph lingers through a slow desktop walk with no
+  // sign of progress, reading as a hang. startBuild() re-clears after the walk
+  // resolves; this pre-clear is what makes the old doc vanish immediately.
+  startElapsed();
+  player?.pause();
+  cancelPendingApply?.(); // a late trailing apply must not write into the cleared scene
+  cancelPendingApply = null;
+  clearSearch();
+  hideDetails();
+  clearDocActive();
+  setSemanticPending(false);
+  graph.graphData({ nodes: [], links: [] });
+  sidebarDocEl.innerHTML = '<div class="doc-empty">walking…</div>';
+  statsBodyEl.innerHTML = '<div class="stat-empty">walking…</div>';
   statsEl.textContent = label ? `walking ${label}…` : "walking…";
   currentText = text ?? defaultDocument; // remember it for the meaning search
   try {
@@ -1086,6 +1156,7 @@ async function loadAndBuild(text?: string, label?: string): Promise<void> {
   } catch (err) {
     console.error("walk failed:", err);
     statsEl.textContent = "walk failed — see console";
+    stopElapsed(); // freeze the timer so it doesn't tick forever on a failed walk
   }
 }
 
