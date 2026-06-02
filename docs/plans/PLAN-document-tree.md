@@ -105,5 +105,7 @@ Once Phase 0 starts, maintain Current Position + completed-step verification
 triples here (or in a dedicated `BUILD_LOG.md`) per
 [`docs/agent-protocols/COMPACTION_RECOVERY.md`](../agent-protocols/COMPACTION_RECOVERY.md).
 
-- **Current Position:** substrate scaffolded; awaiting user go-ahead to start
-  Phase 0.
+- **Current Position:** autonomous build run authorized 2026-06-01 (user: "plow
+  on through, I'll test when finished"). Live ledger is
+  [`BUILD_LOG.md`](../../BUILD_LOG.md); environment resolved (GPU=CUDA, MSVC+CMake
+  in VS 2026, qwen3-4b GGUF on disk). Building Phase 0 → onward.
