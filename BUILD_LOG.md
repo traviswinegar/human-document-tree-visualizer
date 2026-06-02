@@ -148,6 +148,23 @@ navy cloud that vanished on a large graph ("everything is SO DARK… get some
 COLOR"). These are styling commits, not architecture — no ADR, verified the
 D-stream way (tsc + vite build + dev-handle render).
 
+**Workflow switch → desktop from now on (#33, commit `67758f1`).** The user asked
+to drop the browser and run the full desktop app ("No more browser unless we can
+bridge the gap in the future"), after learning the semantic layer (LLM
+character/place/concept/event nodes + similarity edges + meaning search) is
+desktop-only by design (a browser tab can't load a multi-GB local GGUF; the core
+pipeline makes no cloud calls). `scripts/dev-desktop.cmd` is the repeatable
+launcher (vcvars64 → DOCTREE_MODEL_PATH → `tauri dev --features llm,vectordb`).
+**This crossed a long-standing barrier: the first verified full-desktop launch +
+native-stack init from the agent context** — gated build compiled clean (1m26s),
+`doctree-tauri.exe` linked + ran, qwen3-4b loaded (398 tensors, q4_K, 36 CPU
+layers), `llama_context` built, KV/compute buffers reserved, warmed up. The model
+loading *at launch* is evidence the #29 auto-classify chain fired
+(classify→`semantic_build_steps`→`ensure_loaded`). Still the user's interactive
+end test: the **visible** semantic-node render + live classify/meaning-search
+round-trip (the Tauri webview can't be introspected like the browser preview MCP).
+See the #33 entry for the full triple.
+
 **Remaining deferred / blocked items (need a user decision — do NOT start
 autonomously):**
 - **GPU acceleration** — blocked by the CUDA 13.1 ✗ VS 2026 / Vulkan ✗ MSVC 14.50
@@ -261,6 +278,10 @@ autonomously):**
   Root cause: the old palette was all muddy near-blue (structural kinds only span the cool family, and the browser/WASM walk renders *only* structural kinds), so a large graph collapsed into an indistinct navy cloud against the `#05070d` background. The fix attacks it three ways — brighter/more-varied base colors, an additive bloom pass so bright spheres glow, and a higher dim floor so search/selection context stays legible. Frontend-only; default build stays native-free (the ESM `3d-force-graph` externalises `three`, so the bloom addons share its single `three` instance — no module-duplication hazard).
   Note: the **glow intensity** is the user's perceptual call — `preview_screenshot` times out against the continuously-animating WebGL canvas (the documented A5–D4 tooling limitation), so the render is verified by dev-handle introspection (loads clean, renders) rather than by image. The `BLOOM_STRENGTH`/`BLOOM_RADIUS`/`BLOOM_THRESHOLD` constants at the top of the bloom block in `main.ts` are the tuning knobs if the user wants more/less.
   **Follow-up (commit `85a1534`):** the first values (strength 0.85 / radius 0.55 / threshold 0.08) blew nodes out into pure-light orbs — retuned to **strength 0.4 / radius 0.3 / threshold 0.2** (subtle rim, spheres keep their shape). Same verification (tsc + vite build + clean browser reload).
+- **#33** — `scripts/dev-desktop.cmd`: repeatable one-command launcher for the FULL desktop app (structural spine + semantic LLM/embedding layer). _No ADR — tooling/workflow, not load-bearing architecture (cf. the D-stream + #30, also ADR-free)._ User: "let's close this browser and open the desktop app. No more browser unless we can bridge the gap in the future."
+  Commit `67758f1` · "test" = the live desktop launch itself (no automated test for a launcher) · src `scripts/dev-desktop.cmd` (calls `vcvars64.bat` for the MSVC env the gated llama.cpp backend needs, defaults `DOCTREE_MODEL_PATH` to the local qwen3-4b GGUF with an overridable env var + missing-file warning, runs `npm run tauri -- dev --features llm,vectordb`).
+  **Milestone — first verified full-desktop launch from the agent context.** Every prior B-stream entry (B2/B3/B4/#20) flagged the live model load as "the user's desktop end test — the Tauri window cannot be launched/exercised in this headless env." That barrier is now partially crossed: running the launcher in the background, the build output shows the complete chain succeed — `Finished dev profile in 1m 26s` (gated `--features llm,vectordb` compiled clean; only the 4 pre-existing upstream `momusdev_llm` warnings) → `Running target\debug\doctree-tauri.exe` (native binary linked + launched) → `llama_model_loader` loaded the qwen3-4b GGUF (398 tensors, q4_K, 36 layers, all `dev = CPU` as expected since GPU is blocked) → `llama_context` built → KV cache 576 MiB + CPU compute buffer 306.75 MiB reserved → warmup `reserve took 72.54 ms`. The model loading **at launch** (not lazily) is itself evidence the #29 auto-classify-on-load chain fired: frontend loaded → `classify_document` → routed to `semantic_build_steps` (llm feature compiled + model present) → `ensure_loaded`.
+  Note: what's verified is **launch + native-stack init** (compile→link→load GGUF→build context→reserve buffers→ready), proving the gated stack actually initializes end-to-end on this machine. What's still the user's interactive end test is the **visible GUI render of semantic nodes** + the live classify/meaning-search round-trip — the Tauri webview can't be introspected the way the browser preview MCP introspects the WASM build, so the perceptual confirmation (warm character/place/event nodes appear; "find by meaning" returns hits) is the user looking at their own screen. CPU-only (GPU blocked, see Catch-all); a GPU flag-flip awaits the user's toolchain decision.
 
 ---
 
