@@ -1,0 +1,41 @@
+{
+  "nodes": [
+    { "id": "sec:1", "kind": "section", "label": "Chapter One", "provenance": "structural" },
+    { "id": "para:1", "kind": "paragraph", "label": "Paragraph 1", "provenance": "structural" },
+    { "id": "sent:1", "kind": "sentence", "label": "The lighthouse keeper Mara found a sealed letter.", "text": "The lighthouse keeper Mara found a sealed letter.", "span": { "start": 0, "end": 49 }, "provenance": "structural" },
+    { "id": "sent:2", "kind": "sentence", "label": "Inspector Vane arrived at Harbor's End.", "text": "Inspector Vane arrived at Harbor's End.", "span": { "start": 50, "end": 89 }, "provenance": "structural" },
+    { "id": "sent:3", "kind": "sentence", "label": "They argued about the missing ship.", "text": "They argued about the missing ship.", "span": { "start": 90, "end": 125 }, "provenance": "structural" },
+    { "id": "term:ship", "kind": "term", "label": "ship", "provenance": "structural" },
+
+    { "id": "char:mara", "kind": "character", "label": "Mara", "provenance": "semantic" },
+    { "id": "char:vane", "kind": "character", "label": "Inspector Vane", "provenance": "semantic" },
+    { "id": "place:harbors_end", "kind": "place", "label": "Harbor's End", "provenance": "semantic" },
+    { "id": "object:letter", "kind": "object", "label": "the sealed letter", "provenance": "semantic" },
+    { "id": "object:ship", "kind": "object", "label": "the missing ship", "provenance": "semantic" },
+    { "id": "event:argument", "kind": "event", "label": "the argument", "provenance": "semantic" },
+    { "id": "concept:mystery", "kind": "concept", "label": "the missing-ship mystery", "provenance": "semantic" }
+  ],
+  "edges": [
+    { "source": "para:1", "target": "sec:1", "kind": "part_of", "provenance": "structural" },
+    { "source": "sent:1", "target": "para:1", "kind": "part_of", "provenance": "structural" },
+    { "source": "sent:2", "target": "para:1", "kind": "part_of", "provenance": "structural" },
+    { "source": "sent:3", "target": "para:1", "kind": "part_of", "provenance": "structural" },
+
+    { "source": "sent:1", "target": "sent:2", "kind": "precedes", "provenance": "structural" },
+    { "source": "sent:2", "target": "sent:3", "kind": "precedes", "provenance": "structural" },
+
+    { "source": "sent:1", "target": "char:mara", "kind": "mentions", "provenance": "structural" },
+    { "source": "sent:1", "target": "object:letter", "kind": "mentions", "provenance": "structural" },
+    { "source": "sent:2", "target": "char:vane", "kind": "mentions", "provenance": "structural" },
+    { "source": "sent:2", "target": "place:harbors_end", "kind": "mentions", "provenance": "structural" },
+    { "source": "sent:3", "target": "event:argument", "kind": "mentions", "provenance": "structural" },
+    { "source": "sent:3", "target": "object:ship", "kind": "mentions", "provenance": "structural" },
+
+    { "source": "char:mara", "target": "char:vane", "kind": "interacts_with", "label": "argues with", "provenance": "semantic" },
+    { "source": "char:vane", "target": "place:harbors_end", "kind": "located_in", "provenance": "semantic" },
+    { "source": "event:argument", "target": "place:harbors_end", "kind": "located_in", "provenance": "semantic" },
+    { "source": "object:letter", "target": "event:argument", "kind": "causes", "label": "prompts", "provenance": "semantic" },
+    { "source": "concept:mystery", "target": "object:ship", "kind": "relates_to", "provenance": "semantic" },
+    { "source": "term:ship", "target": "object:ship", "kind": "co_occurs_with", "weight": 0.8, "provenance": "structural" }
+  ]
+}

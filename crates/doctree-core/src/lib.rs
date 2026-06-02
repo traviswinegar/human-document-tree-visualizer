@@ -1,11 +1,15 @@
 //! `doctree-core` — the pure-Rust core of human-document-tree.
 //!
 //! This crate holds the deterministic, dependency-light heart of the pipeline:
-//! the graph schema (node/edge types), the GBNF grammar that constrains LLM
+//! the graph [`schema`] (node/edge types), the GBNF grammar that constrains LLM
 //! output to that schema, and the deterministic structure walker that builds the
 //! reproducible "spine" of the graph from a document. It has **no** native, LLM,
 //! or GPU dependencies, so `cargo test -p doctree-core` runs anywhere — that
 //! decoupling is the load-bearing invariant from ADR-0001.
+
+pub mod schema;
+
+pub use schema::{Edge, EdgeKind, Graph, Node, NodeKind, Provenance, Span};
 
 /// Crate name surfaced for diagnostics / the engine-health command.
 pub const CRATE_NAME: &str = "doctree-core";
