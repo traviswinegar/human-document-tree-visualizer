@@ -1,0 +1,27 @@
+[package]
+name = "doctree-wasm"
+description = "WebAssembly bindings for the doctree-core walker — the same pure walker, in the browser (ADR-0003)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# cdylib is what wasm-pack emits the .wasm from; rlib lets `cargo test` build the
+# host-side logic tests (the #[wasm_bindgen] exports run in the browser).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+serde_json = { workspace = true }
+# Pure-Rust core walker — no native/LLM/GPU deps (ADR-0001 invariant preserved).
+doctree-core = { path = "../doctree-core" }
+# Routes Rust panics to console.error in the browser for legible stack traces.
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[features]
+default = ["console_error_panic_hook"]
+
+# Skip the wasm-opt post-pass for now: it would pull a binaryen binary and the
+# walker wasm is already tiny. Re-enable for production size tuning later.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
