@@ -106,6 +106,8 @@ native-free).
 
 ## Current Position
 
+**Phase 7 #3 shipped (2026-06-02) — semantic-layer fallback on large docs FIXED (#70 `b8a12f5`, ledger #71).** The user's 400-page novel rendered but the LLM semantic layer had silently fallen back to the structural spine, so the #67 clustering force ran over structural communities, not the semantic lens they chose (ADR-00012). Root cause = a grammar↔serde gap: `GRAPH_GBNF`'s `char` rule negated only `"` and `\`, letting the sampler emit an *unescaped* control char (U+0000..U+001F) inside a label — grammar-legal but serde-invalid (RFC 8259), so a *complete* 2,678-byte extraction threw in `serde_json::from_str::<Graph>` and `semantic_build_steps` errored *after* a successful 96 s inference. Verified the failure shape against the live-app log (`completion_tokens=734` ≪ ~2048 cap ⇒ EOS, not truncation), ruling out the token cap and pure merge/`build_sequence` (proven at 18k/46k scale). **Fix (test-first):** failing→green unit pinning the serde seam + the rule, then `char ::= [^"\\\x00-\x1F] | "\\" ( ["\\/bfnrt] | "u" hex hex hex hex )` so control-char tokens are masked by construction; plus the misleading "no model on disk" hint replaced by the real backend error threaded `llm.rs` → `SemanticDelta.error` → `fallbackReason` → routing hint. **Gate:** `cargo test --workspace` 123 native-free + `tsc --noEmit` + `vite build`; **live model run** confirmed llama.cpp accepts the tightened `\x00-\x1F` syntax and yields control-char-free deserializable output (`llm_roundtrip.rs:123`, `--features llm,vectordb -- --ignored` → ok, 2,039 bytes, 11 nodes / 21 edges). Resolves the HIGH Catch-all #69. **New MED Catch-all logged:** at scale the extraction prompt feeds the model only the document's opening (~`prompt_tokens=623` for the whole novel) — the semantic layer is context-starved on long docs (chunked / salience / hierarchical extraction options, its own ADR). **Next on the agenda (user, 2026-06-02): a reversible graph↔token↔text tokenizer** — order graph nodes into a token list for a model, reversible back to the graph *or* the original document text, plus a one-button document reconstruction. Load-bearing → ADR + plan doc before code. Phase 7 #2/#1 + Phase 6 history retained below.
+
 **Phase 7 #2 shipped (2026-06-02) — semantic-community clustering force (#67 `cbde9cb`, ADR-00012).** User, watching a novel build: "See these clusters that begin to form early on? How do we preserve those?" Those blobs are real community structure — dense per-chapter webs the force sim surfaces — but nothing *holds* them: the growing LLM semantic cross-links keep pulling the blobs together until they merge, and `applyForceTuning`'s size-scaled link distance spreads nodes uniformly rather than grouping (so the user's "loosen the edges" instinct had the sign backwards). Fix: `src/clustering.ts` detects communities with **seeded Louvain** (`graphology-communities-louvain`) over **all** edges incl. the semantic layer — the user's chosen lens, which can reveal a character's web that spans chapters — and a custom d3 force (`graph.d3Force("cluster", …)`) anchors each node to its community centroid so the blobs tighten while charge repulsion keeps them apart. Strength is **size-scaled by default** (`applyClusterStrength(n)`, wired alongside every `applyForceTuning`) and **live-tunable** via a `#cluster` slider (0 = off); the first drag sets `userSetCluster` and hands control to the user (mirrors `userToggledBundle`). Detection runs only on settle, guarded by a `nodes:links` count key (never per frame) + one reheat. **Gate:** `tsc --noEmit` exit 0 + `npm run build` exit 0 (438 modules; +~93 KB for graphology/louvain in the index chunk) + `cargo test --workspace` exit 0 native-free (122 tests; pure frontend, Rust untouched — ADR-0001). **Deferred levers (new Catch-all):** recolor nodes by community; optional inter-centroid repulsion. The visual result — whether the clusters hold and what strength reads best — is the user's live end test; we tune the slider together in the running app. Phase 7 #1 (#65) + Phase 6 history retained below.
 
 **Phase 7 opened + #1 shipped (2026-06-02) — picking up the two explicitly-non-blocking open items after Phase 6 closed.** User: "work on those issues you mentioned. Then fire it up when you're done." **#65 (`8bf8ee8`, ADR-00011) — adaptive large-graph render LOD + dev-warning (b) fix.** Size-tiered `applyRenderLOD(n)` (wired at every site that already sizes the force field) above `LARGE_GRAPH_NODES=2000`: auto-enable the merged bundle so ~46k native cross-links → 1 draw call (until the user manually toggles — `userToggledBundle` then hands control back), suppress the animated semantic particles, coarsen node-sphere geometry (`nodeResolution` 8→6). Plus `enableNodeDrag(false)`, which removes the unused DragControls and with it **dev-warning (b)** (`Cannot read properties of undefined (reading 'x')` on an interrupted drag); orbit/zoom/pan (camera OrbitControls) is a separate control, unaffected. **Dev-warning (a)** (`IPC custom protocol failed … Failed to fetch` on HMR reload) is a Tauri **dev-server** quirk with a working postMessage fallback, absent from production builds — documented as non-actionable, not chased (honoring its own "don't chase without a repro" note). **Gate:** `tsc --noEmit` exit 0 + `vite build` exit 0; default `cargo test --workspace` re-confirmed green native-free (pure frontend, Rust untouched — ADR-0001). **Remaining open (still non-blocking):** the node-side draw-call lever — a per-node `InstancedMesh` collapsing ~18k node draw calls to one — is deliberately deferred per ADR-00011 because it means replacing 3d-force-graph's picking/hover/theming, which has **no agent-runnable verification** here (do it with interactive testing in the loop). Live model/embedder/GPU runs over a real library remain the user's desktop end tests. Phase 6 COMPLETE and the earlier phase history are retained below.
@@ -621,9 +623,9 @@ autonomously):** _[HISTORY — all three below are now RESOLVED in Phase 6: GPU 
   visualization, native-free; pick them up if live slider-tuning shows charge alone
   isn't enough, or if the user wants the community structure color-coded.
 
-- **🔴 HIGH — semantic layer silently falls back on the 400-page novel:
-  `semantic_build_steps` throws *after* a successful extraction (blocks the #67
-  clustering feature's intended semantic lens).** _(discovered 2026-06-02 while
+- **✅ DONE (#70, commit `b8a12f5`) — semantic layer silently fell back on the
+  400-page novel: `semantic_build_steps` threw *after* a successful extraction
+  (blocked the #67 clustering feature's intended semantic lens).** _(discovered 2026-06-02 while
   relaunching to tune the #67 `#cluster` slider; the routing line read
   "Narrative · 100% · structural · no model on disk; using the spine" with all
   46,477 edges `structural`.)_ The launcher log **disproves** the on-screen label —
@@ -650,6 +652,52 @@ autonomously):** _[HISTORY — all three below are now RESOLVED in Phase 6: GPU 
   only, not the semantic cross-links the user chose as the lens (ADR-00012). Not
   fixed inline (off-topic to the clustering ship; surfaced for promotion, as #37 was
   promoted from a Catch-all HIGH by a user screenshot).
+  - **→ RESOLVED in #70 (commit `b8a12f5`).** Both faults fixed. **Fault (b), the
+    real throw — a grammar↔serde gap.** `GRAPH_GBNF`'s `char` rule negated only
+    `"` and `\`, so the sampler could place an *unescaped* control char
+    (U+0000..U+001F) inside a label — grammar-legal but serde (RFC 8259) rejects
+    it, so `serde_json::from_str::<Graph>` threw on a *complete* 2,678-byte object.
+    The clean one-sentence #37 fixture never hit it; dense novel prose did.
+    Verified against the live-app log (`completion_tokens=734` ≪ the ~2048 cap ⇒
+    EOS, a finished object, not truncation), which ruled out the token cap and
+    pointed straight at deserialize (merge/`build_sequence` are pure and proven at
+    18k/46k scale via `build_steps`). Fix: tighten to `char ::= [^"\\\x00-\x1F] |
+    "\\" ( ["\\/bfnrt] | "u" hex hex hex hex )` so control-char tokens are masked
+    out of the sampler *by construction*. **Fault (a), the lying hint** —
+    `main.ts` hardcoded "no model on disk" for *any* fallback; now the backend
+    error is enriched (serde cause + byte count + escaped head, `llm.rs:320`) and
+    threaded `SemanticDelta.error → BuildSource.fallbackReason →` the routing hint,
+    so the line names the real cause. **Verified:** test-first failing→green unit
+    `grammar_forbids_raw_control_chars_so_constrained_output_deserializes`
+    (`crates/doctree-core/src/grammar.rs:272`); `cargo test --workspace` 123
+    native-free; `tsc --noEmit` + `vite build`; **and the live model run** proving
+    llama.cpp *accepts* the tightened `\x00-\x1F` negated-range syntax and yields
+    control-char-free, deserializable output —
+    `tightened_grammar_output_is_control_char_free_and_deserializes`
+    (`src-tauri/tests/llm_roundtrip.rs:123`, `--features llm,vectordb -- --ignored`)
+    → ok (489 prompt / 579 completion tok, 67.4 s, 2,039 bytes, 11 nodes / 21
+    edges, control-char-free). The #67 clustering force now gets its intended
+    SEMANTIC communities on a large doc.
+
+- **🟡 MED — the extraction prompt feeds the model only the *opening* of a large
+  document (semantic layer is starved of context at scale).** _(discovered while
+  diagnosing #69 — the launcher log showed `prompt_tokens=623` for the entire
+  18,437-node / 650 KB novel.)_ `build_extraction_prompt(&spine)` packs spine text
+  into a fixed prompt budget (~8 KB), but a 400-page book overflows it many times
+  over, so only the first ~15–20 sentences ever reach the model. The fallback bug
+  (#70) masked this — once the spine stood alone you couldn't tell the semantic
+  layer was *also* near-empty — but now that extraction lands, the semantic nodes
+  describe only chapter one. The graph's "meaning layer" is therefore unrepresentative
+  of a long document. Options to weigh (their own ADR — load-bearing): (a) **chunked
+  extraction** — walk the spine in windows, run the grammar-constrained model per
+  window, merge each fragment onto the spine (N inferences, slow on CPU but complete
+  coverage); (b) **salience sampling** — feed a budget-sized selection (headings +
+  high-degree / dialogue-dense sentences) so the single inference spans the whole
+  arc; (c) **hierarchical** — extract per-chapter, then a second pass over the
+  chapter summaries for cross-chapter links. Not fixed inline (out of scope for the
+  #70 fallback fix; it's a coverage/quality decision, not a correctness bug). The
+  per-window inference cost interacts with the GPU path (ADR-0008) and the new
+  tokenizer work (graph↔token↔text), so sequence it deliberately.
 
 ---
 
