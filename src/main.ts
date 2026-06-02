@@ -43,6 +43,13 @@ const speedEl = document.getElementById("speed") as HTMLInputElement;
 const matched = new Set<string>();
 let searchActive = false;
 
+// Selection/highlight state (D2). Clicking a node lights it, its incident edges
+// and immediate neighbors and dims the rest — through the *same* dimming channel
+// as search, so the two coexist (a node lit by either stays lit). `neighborIds`
+// is recomputed per click from whatever edges are currently on screen.
+let selectedId: string | null = null;
+const neighborIds = new Set<string>();
+
 const graph = new ForceGraph3D(container, { controlType: "orbit" })
   .width(window.innerWidth)
   .height(window.innerHeight)
@@ -53,8 +60,8 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
   .nodeColor((n) => {
     const g = asNode(n);
     const base = nodeColor(g.kind);
-    if (!searchActive) return base;
-    return matched.has(g.id) ? base : withAlpha(base, 0.06);
+    if (!highlightActive()) return base;
+    return isNodeLit(g.id) ? base : withAlpha(base, 0.06);
   })
   .nodeVal((n) => nodeSize(asNode(n).kind))
   .nodeLabel((n) => {
@@ -62,15 +69,23 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
     return `<b>${g.label}</b><br/><span style="opacity:.7">${g.kind}</span>`;
   })
   .nodeOpacity(0.95)
-  .onNodeClick((n) => focusNode(n))
+  .onNodeClick((n) => selectNode(n))
+  .onBackgroundClick(() => clearSelection())
   .linkColor((l) => {
     const e = asLink(l);
     const base = edgeColor(e.kind);
-    if (!searchActive) return base;
-    const lit = matched.has(idOf(e.source)) && matched.has(idOf(e.target));
-    return lit ? base : withAlpha(base, 0.04);
+    if (!highlightActive()) return base;
+    return isLinkLit(e) ? base : withAlpha(base, 0.04);
   })
-  .linkWidth((l) => (asLink(l).provenance === "semantic" ? 1.2 : 0.4))
+  // Incident edges of the selected node thicken so the local neighborhood reads
+  // as a unit; otherwise semantic edges stay slightly bolder than structural.
+  .linkWidth((l) => {
+    const e = asLink(l);
+    if (selectedId !== null) {
+      if (idOf(e.source) === selectedId || idOf(e.target) === selectedId) return 2;
+    }
+    return e.provenance === "semantic" ? 1.2 : 0.4;
+  })
   .linkOpacity(0.5)
   // Semantic edges (the LLM-inferred meaning) animate with flowing particles;
   // the deterministic structural spine stays static — motion = "inferred".
@@ -88,7 +103,29 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
 // Re-assigning the accessors is how 3d-force-graph is told to re-evaluate node /
 // link materials after the highlight state changes.
 function refresh(): void {
-  graph.nodeColor(graph.nodeColor()).linkColor(graph.linkColor());
+  graph.nodeColor(graph.nodeColor()).linkColor(graph.linkColor()).linkWidth(graph.linkWidth());
+}
+
+// Is any dimming mode on? When neither search nor selection is active every
+// node/edge renders at full colour (no dimming pass).
+function highlightActive(): boolean {
+  return searchActive || selectedId !== null;
+}
+// A node stays lit if it matches the active search OR is the selection / one of
+// its neighbours. (Both modes union, so they can be on at once.)
+function isNodeLit(id: string): boolean {
+  if (searchActive && matched.has(id)) return true;
+  if (selectedId !== null && (id === selectedId || neighborIds.has(id))) return true;
+  return false;
+}
+// An edge stays lit if both endpoints match the search, or it is incident to the
+// selected node.
+function isLinkLit(e: GraphEdge): boolean {
+  const s = idOf(e.source);
+  const t = idOf(e.target);
+  if (searchActive && matched.has(s) && matched.has(t)) return true;
+  if (selectedId !== null && (s === selectedId || t === selectedId)) return true;
+  return false;
 }
 
 // Ease the camera to look at a node from a fixed standoff distance.
@@ -99,6 +136,33 @@ function focusNode(node: NodeObject): void {
   const dist = Math.hypot(x, y, z) || 1;
   const ratio = 1 + 40 / dist;
   graph.cameraPosition({ x: x * ratio, y: y * ratio, z: z * ratio }, { x, y, z }, 900);
+}
+
+// D2 — select a node: light it, its incident edges and immediate neighbours,
+// dim everything else, and ease the camera to it. Neighbours are read from the
+// edges currently on screen, so mid-build a selection only reflects what's been
+// revealed so far.
+function selectNode(node: NodeObject): void {
+  const id = asNode(node).id;
+  selectedId = id;
+  neighborIds.clear();
+  for (const l of graph.graphData().links) {
+    const e = asLink(l);
+    const s = idOf(e.source);
+    const t = idOf(e.target);
+    if (s === id) neighborIds.add(t);
+    else if (t === id) neighborIds.add(s);
+  }
+  refresh();
+  focusNode(node);
+}
+
+// Drop the selection highlight (background click / Escape / new build).
+function clearSelection(): void {
+  if (selectedId === null) return;
+  selectedId = null;
+  neighborIds.clear();
+  refresh();
 }
 
 function runSearch(): void {
@@ -131,6 +195,8 @@ function resetView(): void {
   searchActive = false;
   matched.clear();
   searchCountEl.textContent = "";
+  selectedId = null;
+  neighborIds.clear();
   refresh();
   graph.zoomToFit(800, 60);
 }
@@ -144,6 +210,11 @@ searchEl.addEventListener("keydown", (e) => {
   }
 });
 resetEl.addEventListener("click", resetView);
+
+// Escape clears the click-selection highlight (background click does too).
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") clearSelection();
+});
 
 window.addEventListener("resize", () => {
   graph.width(window.innerWidth).height(window.innerHeight);
@@ -202,6 +273,8 @@ function clearSearch(): void {
   searchActive = false;
   matched.clear();
   searchCountEl.textContent = "";
+  selectedId = null;
+  neighborIds.clear();
   refresh();
 }
 
@@ -305,6 +378,13 @@ function startBuild(source: BuildSource): void {
       __doctreeSequence: source.sequence,
       __doctreeBuildSequence: buildSequence,
       __doctreeSource: source,
+      // Canvas-raycast clicks can't be synthesized from the console/preview, so
+      // expose the click-selection (D2) by id for verification/scripting.
+      __doctreeSelect: (id: string): boolean => {
+        const n = graph.graphData().nodes.find((x) => asNode(x).id === id);
+        if (n) selectNode(n);
+        return Boolean(n);
+      },
     });
   }
 }
