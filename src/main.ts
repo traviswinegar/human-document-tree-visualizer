@@ -1365,14 +1365,20 @@ function ingestFile(file: File): void {
   if (isPdf(file)) {
     // Show progress immediately: clear the old doc + start the timer before the
     // (potentially slow) extract, reusing loadAndBuild's pre-await clear via a
-    // dedicated "extracting…" beat so a big PDF doesn't read as a hang.
+    // dedicated "extracting…" beat so a big PDF doesn't read as a hang. If the
+    // PDF turns out to be a scan, extractPdfText falls back to OCR (#3) and
+    // reports per-page progress here (OCR is slow, so the count matters).
     statsEl.textContent = `extracting ${file.name}…`;
-    extractPdfText(file)
+    extractPdfText(file, {
+      onOcrProgress: (done, total) => {
+        statsEl.textContent = `OCR ${file.name}: page ${done}/${total}…`;
+      },
+    })
       .then((text) => {
         if (text.trim().length === 0) {
-          // Scanned / image-only PDFs yield no text — there's no OCR (a
-          // documented backlog limit), so say so rather than graph an empty doc.
-          statsEl.textContent = `${file.name}: no extractable text (scanned PDF?)`;
+          // Even OCR found nothing readable — a blank or unreadable scan. Say so
+          // rather than graph an empty doc.
+          statsEl.textContent = `${file.name}: no readable text (even after OCR)`;
           return;
         }
         void loadAndBuild(text, file.name);
