@@ -277,6 +277,61 @@
         background: rgba(122, 162, 255, 0.22);
         color: #eaf2ff;
       }
+      /* Cluster-strength slider (ADR-00012): a compact labelled range matching the
+         control bar's pill aesthetic. The label sits inline so the knob reads as
+         "Cluster: <amount>" rather than a bare orphan slider. */
+      #cluster-wrap {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 10px;
+        border: 1px solid #33415c;
+        border-radius: 6px;
+        background: rgba(13, 20, 38, 0.85);
+        color: #cfe3ff;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      #cluster-wrap:hover {
+        border-color: #7aa2ff;
+      }
+      #cluster-label {
+        letter-spacing: 0.02em;
+        opacity: 0.85;
+        white-space: nowrap;
+      }
+      /* Scoped with two IDs so it outranks the generic `#controls input` rule
+         (which would otherwise re-impose a border/padding on the range track). */
+      #controls #cluster {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 72px;
+        height: 4px;
+        margin: 0;
+        padding: 0;
+        border: none;
+        border-radius: 2px;
+        background: rgba(122, 162, 255, 0.22);
+        cursor: pointer;
+        outline: none;
+      }
+      #cluster::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: #7aa2ff;
+        cursor: pointer;
+      }
+      #cluster::-moz-range-thumb {
+        width: 12px;
+        height: 12px;
+        border: none;
+        border-radius: 50%;
+        background: #7aa2ff;
+        cursor: pointer;
+      }
       #open-doc {
         font-weight: 600;
       }
@@ -815,6 +870,20 @@
       >
         Bundle
       </button>
+      <label
+        id="cluster-wrap"
+        title="Cluster pull: separate detected semantic communities (drag right = tighter, 0 = off)"
+      >
+        <span id="cluster-label">Cluster</span>
+        <input
+          id="cluster"
+          type="range"
+          min="0"
+          max="100"
+          value="0"
+          aria-label="Cluster strength"
+        />
+      </label>
       <input
         id="search"
         type="search"

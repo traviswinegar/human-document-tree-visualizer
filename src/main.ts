@@ -8,6 +8,7 @@ import { nodeColor, nodeSize, edgeColor } from "./colors";
 import { buildSequence, createBuildPlayer, type BuildPlayer } from "./build-player";
 import { isPdf, extractPdfText } from "./pdf";
 import { EdgeBundle, isBackboneKind, type BundleNode, type BundleEdge } from "./bundling";
+import { detectCommunities, clusterForce } from "./clustering";
 import {
   loadBuildSource,
   searchByMeaning,
@@ -74,6 +75,7 @@ const libraryBackdropEl = document.getElementById("library-backdrop")!;
 const libraryListEl = document.getElementById("library-list")!;
 const libraryCloseEl = document.getElementById("library-close") as HTMLButtonElement;
 const bundleEl = document.getElementById("bundle") as HTMLButtonElement;
+const clusterEl = document.getElementById("cluster") as HTMLInputElement;
 const fileInputEl = document.getElementById("file-input") as HTMLInputElement;
 const dropHintEl = document.getElementById("drop-hint")!;
 const speedEl = document.getElementById("speed") as HTMLInputElement;
@@ -284,8 +286,60 @@ function applyRenderLOD(n: number): void {
   if (!userToggledBundle && bundleEdges !== large) setBundling(large);
 }
 
+// --- Semantic-community clustering force (Phase 7 #2 / ADR-00012) -----------
+// The force layout surfaces community structure (on a novel, distinct per-chapter
+// blobs) but nothing holds it — the growing semantic layer's cross-links pull the
+// blobs together until they merge. So detect communities (Louvain over ALL edges,
+// incl. the LLM semantic ones — the user's chosen lens, which can reveal a
+// character's web spanning chapters) and run a custom d3 force that anchors each
+// node to its community centroid: the blobs tighten, charge repulsion keeps them
+// apart, and the structure the user saw is preserved instead of dissolving.
+const communityOf = new Map<string, number>();
+// Live strength (slider 0..100 → 0..CLUSTER_MAX). 0 = off. Read each tick by the
+// force, so retuning needs no re-registration.
+let clusterStrength = 0;
+let userSetCluster = false; // once the user drags the slider, stop auto-defaulting
+const CLUSTER_MAX = 0.4;
+
+// Register the force. communityOf is empty until the first detection pass, so it's
+// inert at startup; it reads clusterStrength live (see slider handler).
+graph.d3Force(
+  "cluster",
+  clusterForce((id) => communityOf.get(id), () => clusterStrength),
+);
+
+// Default the strength scaled by graph size — gentle on small graphs, firmer on
+// large ones where the blobs actually merge — unless the user has taken the slider.
+// Called alongside applyForceTuning/applyRenderLOD at every size-known site.
+function applyClusterStrength(n: number): void {
+  if (userSetCluster) return;
+  clusterStrength = 0.06 + 0.14 * spread(n); // 0.06 (small) … 0.20 (large)
+  clusterEl.value = String(Math.round((clusterStrength / CLUSTER_MAX) * 100));
+}
+
+// Recompute communities only when the topology actually changed (guarded by a
+// node:link count key) — detection is topology-stable, so once per size is enough
+// and it must never run per frame. Called on settle (onEngineStop) and before a
+// slider-driven reheat.
+let detectKey = "";
+function recomputeCommunitiesIfChanged(): void {
+  const data = graph.graphData();
+  const key = `${data.nodes.length}:${data.links.length}`;
+  if (key === detectKey) return;
+  detectKey = key;
+  const ids = data.nodes.map((ro) => asNode(ro).id);
+  const edges = data.links.map((ro) => {
+    const e = asLink(ro);
+    return { source: idOf(e.source), target: idOf(e.target), weight: e.weight };
+  });
+  const next = detectCommunities(ids, edges);
+  communityOf.clear();
+  for (const [k, v] of next) communityOf.set(k, v);
+}
+
 applyForceTuning(0); // baseline for the empty / initial graph
 applyRenderLOD(0); // baseline render LOD (small-graph defaults; no behavior change)
+applyClusterStrength(0); // baseline cluster strength (size-scaled default)
 
 // --- Layout dropdown -------------------------------------------------------
 // Why no top-down/left-right/radial *DAG* layout? The document graph isn't a
@@ -355,6 +409,7 @@ function applyLayout(mode: LayoutMode): void {
   }
   applyForceTuning(data.nodes.length);
   applyRenderLOD(data.nodes.length);
+  applyClusterStrength(data.nodes.length);
   // A restored saved graph freezes the sim (cooldownTicks 0) to hold its exact
   // layout; a deliberate layout switch is the user asking to reflow, so re-enable
   // ticking before reheating or the reheat would be a no-op.
@@ -409,6 +464,13 @@ function clearMergedBundle(): void {
 // rebuild once the engine stops. (onEngineStop also covers the end of a build.)
 graph.onEngineStop(() => {
   if (bundleEdges) rebuildMergedBundle();
+  // Detect communities once the layout has settled (topology is final by then).
+  // If the topology changed (new partition) and clustering is active, one reheat
+  // lets the force pull the fresh communities tight; the next settle finds the
+  // same key and is a no-op, so it terminates rather than looping.
+  const before = detectKey;
+  recomputeCommunitiesIfChanged();
+  if (detectKey !== before && clusterStrength > 0) graph.d3ReheatSimulation();
 });
 graph.onEngineTick(() => {
   if (bundleEdges && bundleShown) clearMergedBundle();
@@ -428,6 +490,18 @@ function setBundling(on: boolean): void {
 bundleEl.addEventListener("click", () => {
   userToggledBundle = true; // user takes manual control; stop auto-managing by size
   setBundling(!bundleEdges);
+});
+
+// Live cluster-strength control. Dragging it is the user taking ownership of the
+// knob (size-defaulting stops), and is an explicit "reflow to cluster" request:
+// ensure the community map exists for the current graph, then reheat so the force
+// applies — even if a restored saved layout had frozen the sim.
+clusterEl.addEventListener("input", () => {
+  userSetCluster = true;
+  clusterStrength = (Number(clusterEl.value) / 100) * CLUSTER_MAX;
+  recomputeCommunitiesIfChanged();
+  graph.cooldownTicks(Infinity);
+  graph.d3ReheatSimulation();
 });
 
 // --- Bloom glow ------------------------------------------------------------
@@ -1160,6 +1234,7 @@ function startBuild(source: BuildSource): void {
   setSemanticPending(false); // cleared now; turned on below if a delta is pending
   applyForceTuning(source.nodeCount); // size the force field for the (final) spine
   applyRenderLOD(source.nodeCount); // size-tier the render LOD for the (final) spine
+  applyClusterStrength(source.nodeCount); // size-scale the cluster strength default
   // B4 — offer "find by meaning" only on a build that can actually embed.
   const meaningOn = Boolean(source.routing?.capabilities.vectordb);
   meaningSearchEl.classList.toggle("hidden", !meaningOn);
@@ -1278,6 +1353,7 @@ function startBuild(source: BuildSource): void {
           statsEl.textContent = `${source.nodeCount} nodes · ${source.edgeCount} edges (${source.origin})`;
           applyForceTuning(source.nodeCount); // re-size the field for the grown graph
           applyRenderLOD(source.nodeCount); // re-tier the render LOD for the grown graph
+          applyClusterStrength(source.nodeCount); // re-scale cluster strength default
           // The semantic/similarity overlay just landed — re-stamp so the new
           // cross-links join the bundles instead of cutting straight across.
           if (bundleEdges) rebuildMergedBundle();
@@ -1670,6 +1746,7 @@ function restoreSavedDoc(doc: SavedDoc): void {
   if (currentLayout === "layers") pinLayers(graph.graphData().nodes);
   applyForceTuning(doc.nodes.length);
   applyRenderLOD(doc.nodes.length); // size-tier the render LOD for the restored graph
+  applyClusterStrength(doc.nodes.length); // size-scale the cluster strength default
 
   renderSidebar(doc.nodes);
   renderStats(doc.nodes, doc.edges);
