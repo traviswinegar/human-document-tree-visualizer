@@ -12,6 +12,7 @@ pub mod classify;
 pub mod grammar;
 pub mod metrics;
 pub mod schema;
+pub mod tokenizer;
 pub mod walker;
 
 pub use build::{build_sequence, BuildStep};
@@ -23,6 +24,10 @@ pub use metrics::{
     compare_pipelines, graph_metrics, GraphMetrics, PipelineComparison, PipelineRun,
 };
 pub use schema::{Edge, EdgeKind, Graph, Node, NodeKind, Provenance, Span};
+pub use tokenizer::{
+    decode_graph, decode_text, encode, stats as token_stats, TokenStats, TokenizeError, Tokens,
+    VOCAB_SIZE,
+};
 pub use walker::{walk, walk_with, WalkOptions};
 
 /// Crate name surfaced for diagnostics / the engine-health command.
