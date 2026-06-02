@@ -55,7 +55,13 @@ nodekind ::= "\"character\"" | "\"place\"" | "\"concept\"" | "\"event\"" | "\"ob
 edgekind ::= "\"mentions\"" | "\"interacts_with\"" | "\"located_in\"" | "\"relates_to\"" | "\"causes\"" | "\"precedes\""
 
 string ::= "\"" char* "\""
-char ::= [^"\\] | "\\" ( ["\\/bfnrt] | "u" hex hex hex hex )
+# The unescaped arm negates the JSON-forbidden control range U+0000..U+001F in
+# addition to `"` and `\`. Without that exclusion the sampler could place a raw
+# control byte (e.g. a newline) inside a label — grammar-legal, but serde (RFC
+# 8259) rejects unescaped control chars, so `serde_json::from_str::<Graph>` would
+# throw and the whole semantic layer would silently fall back to the spine. A
+# clean one-sentence doc never hit it; a 400-page novel did (BUILD_LOG #69).
+char ::= [^"\\\x00-\x1F] | "\\" ( ["\\/bfnrt] | "u" hex hex hex hex )
 hex ::= [0-9a-fA-F]
 "##;
 
@@ -260,6 +266,46 @@ mod tests {
             let _v: EdgeKind = serde_json::from_value(serde_json::json!(k))
                 .unwrap_or_else(|_| panic!("edge kind {k} not in schema"));
         }
+    }
+
+    #[test]
+    fn grammar_forbids_raw_control_chars_so_constrained_output_deserializes() {
+        // Regression: BUILD_LOG #69. A 400-page novel ran a full grammar-
+        // constrained extraction to natural completion (734 tokens, EOS-
+        // terminated, 2678 bytes — a *complete* JSON object, not truncated) yet
+        // `semantic_build_steps`' `serde_json::from_str::<Graph>` threw, so the
+        // semantic layer silently fell back to the deterministic spine. Root
+        // cause: the `char` rule negated only `"` and `\`, so it permitted
+        // *unescaped* control characters (U+0000..U+001F) inside a label — bytes
+        // the grammar's sampler can emit but serde (RFC 8259) rejects. A clean
+        // one-sentence fixture (the B3 live test) never hit it; dense narrative
+        // prose with embedded control bytes did.
+
+        // 1. The exact runtime seam: a raw control char inside a string value
+        //    makes the canonical deserialize fail — this *is* the throw the model
+        //    triggered at scale.
+        let raw_control_in_label =
+            "{\"nodes\":[{\"id\":\"concept:x\",\"kind\":\"concept\",\"label\":\"a\u{0001}b\"}],\"edges\":[]}";
+        assert!(
+            serde_json::from_str::<crate::schema::Graph>(raw_control_in_label).is_err(),
+            "serde rejects unescaped control chars in a JSON string — the grammar must never emit one"
+        );
+        // The very same character *escaped* is valid JSON and deserializes fine,
+        // proving the fix is to forbid the RAW byte, not the character itself.
+        let escaped_in_label =
+            "{\"nodes\":[{\"id\":\"concept:x\",\"kind\":\"concept\",\"label\":\"a\\u0001b\"}],\"edges\":[]}";
+        assert!(
+            serde_json::from_str::<crate::schema::Graph>(escaped_in_label).is_ok(),
+            "an escaped control char is valid JSON — only the raw form is the bug"
+        );
+
+        // 2. Therefore the grammar's `char` rule must exclude the control range,
+        //    keeping constrained output serde-valid *by construction* (the promise
+        //    in GRAPH_GBNF's header comment).
+        assert!(
+            GRAPH_GBNF.contains(r#"[^"\\\x00-\x1F]"#),
+            "char rule must negate the JSON-forbidden control range U+0000..U+001F"
+        );
     }
 
     #[test]

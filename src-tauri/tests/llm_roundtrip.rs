@@ -106,3 +106,63 @@ fn hybrid_extraction_merges_onto_the_spine() {
         spine_nodes
     );
 }
+
+/// Regression for BUILD_LOG #69: on a dense, dialogue-heavy narrative a real
+/// 400-page novel produced a *complete* (EOS-terminated, 2678-byte) extraction
+/// that nonetheless failed `serde_json::from_str::<Graph>`, so the semantic layer
+/// silently fell back to the spine. Root cause: the `char` grammar rule permitted
+/// unescaped control characters (U+0000..U+001F) inside labels — grammar-legal but
+/// serde-invalid. The fix tightened `char` to negate that range, so the sampler
+/// can no longer emit a raw control byte regardless of the document's content.
+///
+/// This proves the fix two ways at runtime: (1) llama.cpp's GBNF parser *accepts*
+/// the tightened grammar (the `LlamaSampler::grammar` build doesn't error), and
+/// (2) the constrained output carries no raw control char and deserializes cleanly.
+#[test]
+#[ignore = "loads a multi-GB GGUF model; run with --features llm -- --ignored"]
+fn tightened_grammar_output_is_control_char_free_and_deserializes() {
+    use doctree_llm::build_extraction_prompt;
+    use doctree_tauri_lib::walk_document_impl;
+
+    // A multi-paragraph narrative with dialogue, em-dashes, and several named
+    // entities — the kind of dense prose that surfaced the bug, far richer than
+    // the one-sentence B3 fixture above.
+    let doc = "# Chapter One — The Harbor\n\n\
+        Mara Vane stood at the edge of the cove, watching the tide pull at the wreck. \
+        \"You shouldn't have come,\" said Inspector Holloway, his coat heavy with rain. \
+        She did not turn. \"The ship was mine,\" she answered. \"The Drowned Lantern — \
+        my father's boat.\"\n\n\
+        Holloway studied the broken mast. The Harbor Guild had ruled it an accident; \
+        Mara called it murder. Between them lay the ledger, its pages swollen with salt, \
+        naming every captain the Guild had ruined.\n\n\
+        ## Chapter Two — The Ledger\n\n\
+        That night, in the lamplit room above the chandlery, they argued about betrayal \
+        and debt. Captain Ross had vanished. The storm — or someone — had taken the rest.";
+
+    let spine = walk_document_impl(doc, None);
+    let prompt = build_extraction_prompt(&spine);
+    let engine =
+        doctree_llm::Engine::load(&doctree_llm::LlmConfig::from_env()).expect("load model");
+    let json = engine
+        .extract_graph_json(&prompt)
+        .expect("grammar-constrained extraction (proves the tightened GBNF still compiles)")
+        .text;
+
+    // (2a) No raw control char survived into the output — the grammar masked them.
+    if let Some((i, c)) = json.char_indices().find(|(_, c)| (*c as u32) < 0x20 && *c != '\t') {
+        panic!("raw control char U+{:04X} at byte {i} leaked into output:\n{json}", c as u32);
+    }
+    // (2b) …and it deserializes into the schema by construction.
+    let fragment: doctree_core::Graph = serde_json::from_str(&json)
+        .unwrap_or_else(|e| panic!("constrained output still not schema JSON: {e}\n{json}"));
+    assert!(
+        fragment.nodes.iter().any(|n| n.kind.is_semantic()),
+        "expected semantic nodes from a narrative, got: {json}"
+    );
+    eprintln!(
+        "control-char-free → {} bytes, {} nodes / {} edges",
+        json.len(),
+        fragment.nodes.len(),
+        fragment.edges.len()
+    );
+}

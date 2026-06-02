@@ -310,8 +310,17 @@ pub async fn semantic_build_steps(
         .map_err(|e| format!("extraction task failed to join: {e}"))??;
 
     // 3. Parse the fragment, merge onto the spine, prune danglers (all pure).
-    let fragment: Graph =
-        serde_json::from_str(&json).map_err(|e| format!("LLM output was not schema JSON: {e}"))?;
+    //    On failure, name the serde cause (it carries line:col) plus the output
+    //    size and a debug-escaped head — so a grammar-vs-serde gap (e.g. a raw
+    //    control char the grammar once permitted, BUILD_LOG #69) is diagnosable
+    //    from the surfaced error instead of guessed at.
+    let fragment: Graph = serde_json::from_str(&json).map_err(|e| {
+        let head: String = json.chars().take(200).collect();
+        format!(
+            "LLM output was not schema JSON ({e}); {} bytes, starts: {head:?}",
+            json.len()
+        )
+    })?;
     let merged = merge_semantic_onto_spine(spine, fragment);
 
     // 4. Ordered build steps for the animated hybrid build.

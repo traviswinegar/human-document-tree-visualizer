@@ -1049,7 +1049,13 @@ function renderRouting(source: BuildSource): void {
   const pipeline = source.fellBack ? "structural" : PIPELINE_LABEL[r.resolvedPipeline];
   let html = `<span class="cls">${r.class}</span> · ${conf}% · ${pipeline}`;
   if (source.fellBack) {
-    html += ` <span class="hint">· no model on disk; using the spine</span>`;
+    // The model is usually present and *did* run — the old "no model on disk"
+    // text was a lie. Surface the real backend error (truncated) when we have it.
+    const reason = source.fallbackReason?.trim();
+    const hint = reason
+      ? `semantic layer failed: ${reason.length > 140 ? reason.slice(0, 137) + "…" : reason}`
+      : "semantic layer unavailable; using the spine";
+    html += ` <span class="hint" title="${esc(reason ?? hint)}">· ${esc(hint)}</span>`;
   } else if (r.downgraded) {
     const want =
       r.recommendedPipeline === "narrative_hybrid" ? "--features llm" : "--features vectordb";
@@ -1345,7 +1351,8 @@ function startBuild(source: BuildSource): void {
         if (player !== p) return; // a newer build replaced us mid-extraction
         if (delta.fellBack) {
           source.fellBack = true;
-          renderRouting(source); // now show "no model on disk; using the spine"
+          source.fallbackReason = delta.error; // carry the real backend cause
+          renderRouting(source); // now name why the semantic layer didn't land
         } else if (delta.events.length > 0) {
           p.append(delta.events);
           source.nodeCount += delta.nodeCount;
