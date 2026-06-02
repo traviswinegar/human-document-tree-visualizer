@@ -106,38 +106,50 @@ native-free).
 
 ## Current Position
 
-**Deferred frontend wiring (B3/B4/B5) — the next *build-order* step.** Stream A is
-**complete** end to end (doc → walker → ordered build steps → animated,
-interactive, replayable 3D graph; A1–A8). The semantic **B-stream backend is
-complete (B1–B5)** and the **dual-pipeline benchmark (#20) just landed**, so the
-backend Rust work is done; what remains in the standing "finish the rest" mandate
-is wiring the frontend to the capability-aware backend it already has.
+**All build-order steps complete — #29 (frontend wiring) just landed; only
+explicitly-deferred / blocked items remain.** The autonomous "finish the rest of
+your known plans and deferred items" mandate has reached its natural floor: every
+walk-plan unit (A1–A8, B1–B5, C1, D1–D4) plus the dual-pipeline benchmark (#20)
+plus the deferred frontend-integration pass (#29) is shipped and verified. What's
+left in the backlog is, by construction, either **blocked on user sign-off** (GPU
+acceleration) or **future-product-surface scope** explicitly deferred by an ADR
+(cross-document LanceDB → ADR-0004; LLM confirmation of low-confidence
+classifications → ADR-0005). None can proceed autonomously without a decision.
 
-**#20 just landed:** the measuring tape for "does the expensive LLM path earn its
-keep." Pure, native-free `doctree-core::metrics` (`graph_metrics` →
+**#29 just landed:** the frontend now consumes the capability-aware backend it
+already had. On the Tauri path it classifies on load via `classify_document`,
+dispatches to the **resolved** build command the classifier names
+(`semantic_build_steps` / `embedded_build_steps` / `build_steps`), and gracefully
+falls back to the structural spine if the richer command fails at runtime (feature
+compiled but model file missing). A capability-gated "find by meaning" box
+(`semantic_search`, shown only when `routing.capabilities.vectordb`) shares the
+literal search's highlight channel, and a `#routing` HUD line surfaces the class +
+confidence + resolved pipeline, with a warm hint on downgrade/fallback. Frontend
+only — the default build stays native-free. Flagged **desktop-only-untested**: the
+classify/dispatch *logic* type-checks and the browser/WASM fallback renders the
+structural walk ("structural · in-browser walk", meaning box hidden), but the live
+model/embedder dispatch + meaning search are the user's desktop end test (the Tauri
+window can't launch headlessly).
+
+**#20 (the prior step):** the measuring tape for "does the expensive LLM path earn
+its keep." Pure, native-free `doctree-core::metrics` (`graph_metrics` →
 `{nodes, edges, valid, edge_density, node_kinds, edge_kinds, provenance}`;
 `PipelineRun::measured`; `compare_pipelines` → `{node_delta, edge_delta,
 latency_ratio}`) computes the per-stage comparison headlessly, and the
 `#[ignore]`d `--features llm` harness `src-tauri/tests/benchmark_roundtrip.rs`
 runs the real head-to-head — walk (tier1) vs prompt→extract→merge (hybrid) —
-timing each stage and printing the per-stage report. No ADR (a tool, not
-architecture); no Tauri command (a developer measurement, not a runtime feature —
-the metrics surface can back a UI benchmark later if wanted). The pure/gated split
-mirrors B3/B4/B5: comparison logic in core, the live model run desktop-only.
+timing each stage and printing the per-stage report.
 
-**The next *build-order* step is the deferred frontend-integration pass.** The
-gated/classification backends (`classify_document`, `semantic_build_steps`,
-`embedded_build_steps`, `semantic_search`) are all registered and headlessly
-verified, but the **frontend still calls only the structural `build_steps`/wasm
-path**. One integration pass should: classify on load via `classify_document`,
-dispatch to the **resolved** build command it names, add a "find by meaning"
-search box (`semantic_search`) alongside the literal search, and surface the
-document class / any capability downgrade in the UI (with graceful fallback to the
-structural path when `llm_status` reports no engine). Frontend-only — the default
-build stays native-free. Flagged **desktop-only-untested**: the classify/dispatch
-*logic* is verifiable headlessly (the classifier is native-free) and the wasm
-fallback renders in the browser, but the live model/embedder runs are the user's
-desktop end test (the Tauri window can't launch headlessly).
+**Remaining deferred / blocked items (need a user decision — do NOT start
+autonomously):**
+- **GPU acceleration** — blocked by the CUDA 13.1 ✗ VS 2026 / Vulkan ✗ MSVC 14.50
+  toolchain mismatch; needs the user to pick a fix path (see Catch-all). CPU is the
+  working path for every LLM acceptance.
+- **Cross-document / persistent vector search (LanceDB)** — deferred by ADR-0004;
+  only relevant once search spans a corpus and must survive restarts. Single-doc
+  in-memory cosine is the current product surface.
+- **LLM confirmation for low-confidence classifications** — deferred by ADR-0005;
+  the deterministic classifier separates the fixtures cleanly without a model.
 
 > **Stream C (C1) landed since this position was set.** The public web build now
 > walks documents in-browser via WASM (`doctree-core` → wasm32, same engine as
@@ -233,6 +245,9 @@ desktop end test (the Tauri window can't launch headlessly).
   Commit `c5742fa` · tests `crates/doctree-core/src/metrics.rs::tests::{metrics_count_kinds_and_provenance, metrics_are_deterministic, edge_density_is_edges_per_node_and_empty_is_zero, comparison_reports_deltas_and_latency_ratio, latency_ratio_floors_a_sub_millisecond_baseline, metrics_serialize_camel_case_with_snake_case_histogram_keys, comparison_serializes_camel_case}` (7, all default native-free) + ignored live harness `src-tauri/tests/benchmark_roundtrip.rs::benchmarks_tier1_against_hybrid_per_stage` (`--features llm`) · src `crates/doctree-core/src/metrics.rs` (`GraphMetrics`, `graph_metrics`, `PipelineRun`/`PipelineRun::measured`, `PipelineComparison`, `compare_pipelines`), `crates/doctree-core/src/lib.rs` (re-exports), `crates/doctree-core/src/schema.rs` (`PartialOrd`/`Ord` on `NodeKind`/`EdgeKind`/`Provenance` so the histograms key into a deterministic `BTreeMap`), `src-tauri/tests/benchmark_roundtrip.rs` (the gated live head-to-head).
   Verified: default `cargo test --workspace` **93 green, native-free** (core 51 incl. 7 new `metrics` + integration 2 + llm 13 + tauri 21 + wasm 6; `cargo tree -p doctree-tauri` shows no `momusdev`/`llama`/`lancedb`/`fastembed`/`arrow`); gated `cargo test -p doctree-tauri --features llm --no-run` compiles clean under MSVC (17.5 s incremental, llama.cpp cached) and **builds the `benchmark_roundtrip` binary** — proving the harness compiles against the live `Engine`/`build_extraction_prompt`/`merge_semantic_onto_spine` APIs. The comparison machinery is pure `doctree-core` (`graph_metrics` → counts + per-kind/per-provenance `BTreeMap` histograms + validity + edges-per-node; `compare_pipelines` → node/edge deltas + a latency ratio whose baseline is floored at 1 ms so a sub-millisecond Tier-1 never divides by zero), serialized camelCase with snake_case enum histogram keys for the frontend.
   Note: the **live head-to-head** (walk the spine → build the anchored prompt → grammar-constrained extraction on a real CPU model → merge → time each stage → per-stage report) is the user's desktop end test — run with `set DOCTREE_MODEL_PATH=…\qwen3-4b-q4km.gguf` then `cargo test -p doctree-tauri --features llm --test benchmark_roundtrip -- --ignored --nocapture`. No Tauri command was added: the benchmark is a developer measurement (exercised via the ignored harness), not a runtime feature — the metrics surface can back a UI benchmark in the deferred frontend pass if wanted. Embeddings (B4) are a possible third lane but kept out of #20's scope (the user named "LLM vs Tier-1").
+- **#29** — frontend integration pass (B3/B4/B5): classify on load → dispatch to the resolved build command + "find by meaning" search + capability-aware UI. _No ADR — frontend wiring of an already-decided backend; the load-bearing decisions live in ADR-0004 (embeddings) and ADR-0005 (routing)._
+  Commit `c350174` · test `npx tsc --noEmit` (exit 0) + `npm run build` (tsc && vite build, exit 0 — wasm rebuilt, 393 modules transformed, `dist/` emitted: ~1,350 kB `index.js` + 183 kB wasm chunk); browser/WASM path verified to render the structural walk with the routing line reading "structural · in-browser walk" and the meaning box hidden (capabilities.vectordb absent off-Tauri) · src `src/doc-source.ts` (`BuildSource` gains `routing?`/`command?`/`fellBack?`; B5 routing DTOs `DocumentClass`/`RecommendedPipeline`/`ResolvedPipeline`/`ClassificationSignals`/`Capabilities`/`Routing` + `MeaningHit`; cached `tauriInvoke`; `loadTauriBuildSource` classifies then dispatches to `routing.command` with a `build_steps` fallback on runtime failure; `searchByMeaning` wraps `semantic_search`), `src/main.ts` (`renderRouting` HUD line — class · confidence · pipeline + warm downgrade/fallback hint; `runMeaningSearch` sharing the literal search's highlight/dimming channel; `PIPELINE_LABEL`; `currentText` tracked for re-query; meaning box toggled on `source.routing?.capabilities.vectordb` in `startBuild`), `index.html` (`#routing` line under `#stats`; capability-gated `#meaning-search` input + `#meaning-count`).
+  Verified: both frontend gates exit 0 and the browser path renders unchanged (the default build stays native-free — no new native dep, the Tauri-only calls are dynamic-imported behind `isTauri()`). Flagged **desktop-only-untested**: the classify→dispatch chain and the embedding-backed meaning search require the live model/embedder, which can't load in this headless env — they are the user's desktop end test (`npm run tauri dev`, then classify a narrative doc and try "find by meaning"). The classifier itself is native-free so the *routing* always resolves; only the model-backed `semantic_build_steps`/`embedded_build_steps`/`semantic_search` need a desktop model, and the frontend degrades to the structural spine (with a visible hint) when they fail.
 
 ---
 
@@ -283,17 +298,21 @@ desktop end test (the Tauri window can't launch headlessly).
   `semantic_search` through an ANN query instead of the in-memory rank. Not
   started — single-document similarity is the current product surface.
 
-- **Frontend wiring for the semantic B-stream (B3/B4) — desktop-only, untested in
-  this env.** _(deferred while landing the B2–B4 backend, like the B3 trigger.)_
-  The gated commands (`semantic_build_steps`, `embedded_build_steps`,
-  `semantic_search`) are registered and headlessly compile-verified, but the
-  desktop frontend still calls only the structural `build_steps`/wasm path.
-  `src/doc-source.ts` should prefer the semantic commands when `llm_status`
-  reports the capability, with graceful fallback to structural; `semantic_search`
-  should back a free-text "find by meaning" box that complements the literal
-  search. Left for one integration commit after the backend B-stream is complete,
-  clearly flagged desktop-only-untested (the live model/embedder run is the
-  user's end test — the Tauri window can't be exercised headlessly).
+- **✅ DONE (#29, commit `c350174`) — Frontend wiring for the semantic B-stream
+  (B3/B4/B5) — desktop-only, untested in this env.** _(deferred while landing the
+  B2–B4 backend, like the B3 trigger.)_ The gated commands (`semantic_build_steps`,
+  `embedded_build_steps`, `semantic_search`) were registered and headlessly
+  compile-verified, but the frontend called only the structural `build_steps`/wasm
+  path. **Shipped as designed:** `src/doc-source.ts` now classifies on load via
+  `classify_document` and dispatches to the **resolved** command the classifier
+  names (richer than the original "prefer when `llm_status` reports the capability"
+  — the B5 router subsumes the capability check and degrades hybrid → similarity →
+  spine), with a runtime fallback to `build_steps` if the model-backed command
+  fails; `semantic_search` backs a capability-gated "find by meaning" box that
+  complements the literal search; a `#routing` HUD line surfaces the class +
+  resolved pipeline + any downgrade. See the #29 completed entry for the full
+  triple. Flagged desktop-only-untested as planned (the live model/embedder run is
+  the user's end test — the Tauri window can't be exercised headlessly).
 
 ---
 
