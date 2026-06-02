@@ -106,26 +106,31 @@ native-free).
 
 ## Current Position
 
-**B4 — embeddings → similarity edges + search (gated, vectordb).** Stream A is
-**complete** end to end (doc → walker → ordered build steps → animated,
-interactive, replayable 3D graph; A1–A8). **B3 just landed:** a gated Tauri
-command (`semantic_build_steps`, behind the `llm` feature) walks a document into
-its deterministic spine, builds an anchored extraction prompt from the spine's
-Section/Sentence text, runs the grammar-constrained model to emit a
-`{nodes,edges}` fragment, **merges** it onto the spine (spine wins id collisions)
-and prunes dangling semantic edges — returning the same `BuildStep` stream the
-animated build already replays, so the flowing-particle semantic edges need no
-new render path. The default build stays native-free (verified via `cargo
-tree`); the `--features llm` build compiles clean under MSVC (my code
-warning-free; only the upstream `momusdev_*` crates warn).
+**B5 — document-type detection runtime gate (classify narrative vs not → route).**
+Stream A is **complete** end to end (doc → walker → ordered build steps →
+animated, interactive, replayable 3D graph; A1–A8). The semantic B-stream now has
+two layers landed on top of the spine: **B3** (LLM grammar-constrained extraction
+merged onto the spine, `semantic_build_steps`) and **B4** (embedding similarity).
 
-B4 is the next *build-order* step: embed the spine/semantic nodes (gated
-`vectordb` sub-feature → momusdev's LanceDB store), add **similarity edges**
-between near-neighbour nodes, and expose semantic **search** (query → nearest
-nodes) to the frontend. CPU is the working path; GPU still blocked (Catch-all).
-Model at `DOCTREE_MODEL_PATH`. Desktop-only at runtime — the live embed/query is
-the user's end test, but the edge-derivation and ranking logic are pure and
-unit-testable headlessly.
+**B4 just landed:** two gated Tauri commands behind the `vectordb` feature —
+`embedded_build_steps` walks the spine, embeds its content nodes (all-MiniLM-L6-v2
+via fastembed/ONNX), derives weighted `SimilarTo` edges between near neighbours
+(top-k per node above a cosine threshold) and returns the augmented `BuildStep`
+stream; `semantic_search` embeds a free-text query and ranks the nodes by cosine.
+Per **ADR-0004**, similarity is computed **in-memory** (no LanceDB at this
+single-document scale — deferred to a future corpus/RAG milestone) and `vectordb`
+is **decoupled from `llm`** (embeddings build with no C++ toolchain — fastembed
+downloads a prebuilt ONNX runtime). All the similarity math (cosine, top-k, edge
+derivation, ranking) is pure native-free code in `doctree-llm`, tested by the
+default suite; only the embedder model is gated.
+
+B5 is the next *build-order* step: classify an incoming document (narrative
+fiction vs. other) at runtime and **route** the pipeline accordingly — Phase 1's
+ontology (ADR-0002) is narrative-specific, so a non-narrative document should
+take a different (or degraded) path rather than be force-fit. Likely a cheap
+deterministic classifier (structural/lexical signals) with an optional LLM
+confirmation when that layer is present. Pure classification logic is unit-
+testable headlessly; the routing wires into the command layer.
 
 > **Stream C (C1) landed since this position was set.** The public web build now
 > walks documents in-browser via WASM (`doctree-core` → wasm32, same engine as
@@ -209,6 +214,10 @@ unit-testable headlessly.
   Commit `5521c23` · tests `crates/doctree-core/src/schema.rs::tests::{prune_dangling_edges_drops_only_unwired_edges, prune_is_a_noop_on_a_valid_graph}` + `crates/doctree-llm/src/lib.rs::tests::{extraction_prompt_anchors_spine_and_lists_kinds, extraction_prompt_respects_the_doc_budget}` + `src-tauri/src/llm.rs::tests::merge_semantic_onto_spine_is_authoritative_and_valid` (all on the default native-free build) + ignored end-to-end `src-tauri/tests/llm_roundtrip.rs::hybrid_extraction_merges_onto_the_spine` · src `crates/doctree-core/src/schema.rs` (`Graph::prune_dangling_edges`), `crates/doctree-llm/src/lib.rs` (`build_extraction_prompt`, `PROMPT_DOC_BUDGET_BYTES`), `src-tauri/src/llm.rs` (pure `merge_semantic_onto_spine`; gated `ensure_loaded`/`extract_blocking`/async `semantic_build_steps`; native-free `semantic_build_steps` stub), `src-tauri/src/lib.rs` (`generate_handler!` + `llm::semantic_build_steps`).
   Verified: default `cargo test` green (core 36, llm 7, tauri 13) with ZERO native deps (`cargo tree -p doctree-tauri` shows no `momusdev`/`llama`/`lance`); gated `cargo test --no-run -p doctree-tauri --features llm` compiles clean under MSVC (my crates warning-free; only upstream `momusdev_*` warn) and builds the ignored hybrid round-trip binary. The merge is spine-authoritative: `Graph::merge` keeps the deterministic spine on id collisions, appends semantic edges, then `prune_dangling_edges` drops any the model wired to ids it didn't ground — the hybrid graph is valid by construction and orders into the existing `BuildStep` stream (no new frontend render path).
   Note: the **live extraction merge** (walk → prompt → grammar-constrained model → fragment → spine-union → build steps) is the user's desktop end test — run as the B2 note above. The orchestration's pure pieces (prompt builder, spine-union, prune) are unit-tested headlessly; the model round-trip is not runnable in this env.
+- **B4** — embedding similarity edges + semantic search (gated `vectordb`) + ADR-0004.
+  Commit `58aeae6` · tests `crates/doctree-llm/src/lib.rs::tests::{cosine_similarity_handles_identical_orthogonal_and_degenerate, rank_by_similarity_orders_best_first_and_truncates, similarity_edges_link_only_pairs_above_threshold, similarity_edges_respect_top_k, graph_embedding_inputs_selects_content_nodes, embed_cache_dir_prefers_the_env_var}` + `src-tauri/src/llm.rs::tests::{attach_similarity_edges_appends_valid_weighted_links, to_search_hits_attaches_label_and_kind_and_serializes_camel_case}` (all default native-free) + ignored live `src-tauri/tests/embedding_roundtrip.rs::{embedder_returns_a_384d_vector, related_text_is_closer_than_unrelated_text, similarity_edges_augment_the_spine}` · src `crates/doctree-llm/src/lib.rs` (`cosine_similarity`, `SimilarityOptions`, `similarity_edges`, `rank_by_similarity`, `SearchHit`, `is_embeddable_kind`, `graph_embedding_inputs`, `embed_cache_dir`, `EMBED_CACHE_ENV`; gated `Embedder` over momusdev's `FastEmbedder`), `src-tauri/src/llm.rs` (pure `attach_similarity_edges`, `SearchHitDto`, `to_search_hits`; gated `ensure_embedder_loaded`/`embed_batch_blocking`/async `embedded_build_steps`+`semantic_search`; native-free stubs + `no_vectordb_error`), `src-tauri/src/lib.rs` (two-slot `LlmState` gated `any(llm,vectordb)`; `generate_handler!` + `embedded_build_steps`/`semantic_search`), `crates/doctree-llm/Cargo.toml` + `src-tauri/Cargo.toml` (`vectordb` feature decoupled from `llm`), ADR `docs/adr/ADR-0004-embedding-similarity-layer.md`.
+  Verified: default `cargo test --workspace` **72 green, native-free** (core 36 + integration 2 + llm 13 + tauri 15 + wasm 6; `cargo tree -p doctree-tauri` shows no `momusdev`/`llama`/`lancedb`/`fastembed`/`arrow`); `--features llm` still compiles clean under MSVC after the `LlmState` two-slot refactor (regression check); gated `cargo test --no-run -p doctree-tauri --features vectordb` compiles clean under MSVC in ~2m44s (my crates warning-free; only 2 upstream `momusdev_llm` warnings) and builds the ignored `embedding_roundtrip` binary — and notably did **not** compile llama.cpp, proving the decoupling (the embedder builds with no C++ toolchain). Per ADR-0004 similarity is in-memory cosine (no LanceDB at single-document scale) and `vectordb` is independent of `llm` (embeddings build with no C++ toolchain — fastembed downloads a prebuilt ONNX runtime).
+  Note: the **live embedding round-trip** (ONNX model load → real 384-d vectors → similarity edges) is the user's desktop end test — the model can't load in this headless env. Run with `cargo test -p doctree-tauri --features vectordb -- --ignored --nocapture` (optionally `set DOCTREE_EMBED_CACHE=…` to a pre-populated cache for offline use). The pure similarity math (cosine/top-k/ranking/edge derivation) is unit-tested headlessly.
 
 ---
 
@@ -247,6 +256,29 @@ unit-testable headlessly.
     (RTX 3060 Ti idle). Recommend (c) now, (a) when GPU speed is wanted — the
     crate already gates `cuda`/`vulkan` behind features, so enabling later is a
     flag flip, no code change.
+
+- **Cross-document / persistent vector search (LanceDB).** _(scoped out of B4 by
+  [ADR-0004](docs/adr/ADR-0004-embedding-similarity-layer.md).)_ B4 computes
+  embedding similarity **in-memory** over a single document's node vectors — at
+  that scale (tens–hundreds of nodes) brute-force cosine beats building an index.
+  The LanceDB store ADR-0001 named is the right tool only once search spans a
+  **corpus** of documents and must survive restarts (true RAG). When that arrives:
+  persist node embeddings to `momusdev_llm`'s LanceDB store (already pulled in by
+  the `vectordb` feature, currently unused), key by document + node id, and route
+  `semantic_search` through an ANN query instead of the in-memory rank. Not
+  started — single-document similarity is the current product surface.
+
+- **Frontend wiring for the semantic B-stream (B3/B4) — desktop-only, untested in
+  this env.** _(deferred while landing the B2–B4 backend, like the B3 trigger.)_
+  The gated commands (`semantic_build_steps`, `embedded_build_steps`,
+  `semantic_search`) are registered and headlessly compile-verified, but the
+  desktop frontend still calls only the structural `build_steps`/wasm path.
+  `src/doc-source.ts` should prefer the semantic commands when `llm_status`
+  reports the capability, with graceful fallback to structural; `semantic_search`
+  should back a free-text "find by meaning" box that complements the literal
+  search. Left for one integration commit after the backend B-stream is complete,
+  clearly flagged desktop-only-untested (the live model/embedder run is the
+  user's end test — the Tauri window can't be exercised headlessly).
 
 ---
 
