@@ -140,9 +140,9 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
 // addon passes share the one `three` instance the composer renders with.
 // Tunables — bump STRENGTH for more glow, lower THRESHOLD to make dimmer nodes
 // (and edges) bloom too:
-const BLOOM_STRENGTH = 0.85; // intensity of the glow
-const BLOOM_RADIUS = 0.55; // how far the glow spreads
-const BLOOM_THRESHOLD = 0.08; // luminance above which a pixel blooms (low → most nodes glow)
+const BLOOM_STRENGTH = 0.4; // intensity of the glow — restrained, so spheres keep their shape
+const BLOOM_RADIUS = 0.3; // how tightly the glow hugs the node (smaller = tighter halo)
+const BLOOM_THRESHOLD = 0.2; // only pixels brighter than this bloom — keeps it a rim, not a blowout
 const bloomPass = new UnrealBloomPass(
   new Vector2(window.innerWidth, window.innerHeight),
   BLOOM_STRENGTH,
