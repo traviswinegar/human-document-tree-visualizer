@@ -79,7 +79,7 @@ Cargo **workspace** at repo root:
 | A5 | 0/3 | Frontend scaffold: Vite+TS+3d-force-graph | dev server boots; renders fixture graph |
 | A6 | 3 | 3D render: color-by-type, force layout, orbit/zoom/pan, search, drag, animated edges, reset | all interactions work on fixture |
 | A7 | 4 | Live animated build + replay (Tauri events stream spine; record→replay) | watch build; replay reproduces ordered build; explore after |
-| A8 | 0/4 | Tauri command runs walker on a real doc and streams to frontend (no LLM) | end-to-end doc→animated graph, no LLM |
+| A8 | 4 ✓ | Tauri command runs walker on a real doc and streams to frontend (no LLM) | end-to-end doc→animated graph, no LLM |
 | B1 | 0 | `doctree-llm` crate: momusdev_llm optional dep; resolve `complete_with_grammar` visibility (READ); attempt CUDA build (background) | crate builds under `--features llm`; `cargo test` green w/o it |
 | B2 | 0 | Tauri command calls `complete_chat_direct` w/ qwen3-4b → returns text to frontend | ADR-0001 acceptance: inference round-trip |
 | B3 | 5 | LLM semantic layer: grammar-constrained extraction merged onto spine | fixture fiction → characters/events/edges; schema-valid |
@@ -93,16 +93,23 @@ while it compiles.
 
 ## Current Position
 
-**A8 — Tauri wiring: a desktop command runs the deterministic walker on a real
-document and streams the ordered spine to the frontend (no LLM), so it's an
-end-to-end doc→animated graph.** Stream A frontend is complete and fully
-interactive with an animated build+replay driven by an ordered event stream
-(A1–A7). A8 connects that frontend stream path to a real backend: stand up the
-`src-tauri` app crate, expose walk + streaming commands over `doctree-core`, and
-have the frontend consume Tauri events (with the in-browser fixture as fallback).
-Note: the GUI window itself can't be launched/screenshotted in this headless
-environment — compile + Rust unit tests + browser-fallback are what I can verify;
-the live desktop window is the user's end test. GPU still CPU-only (Catch-all).
+**B2 — Tauri inference round-trip (ADR-0001 acceptance): a desktop command calls
+`momusdev_llm` (qwen3-4b, CPU) and returns text to the frontend.** Stream A is
+**complete** end to end: doc → deterministic walker → ordered build steps →
+animated, interactive, replayable 3D graph, with a Tauri app crate exposing
+`walk_document`/`build_steps` over `doctree-core` and a browser-fixture fallback
+(A1–A8, all committed + verified, default build native-free, 48 tests green).
+B2 begins Stream B (the gated LLM layer): wire a Tauri command behind the `llm`
+feature that runs CPU inference and round-trips text, then verify the GBNF
+grammar actually compiles (watch the ~5-alternative ceiling on `nodekind`/
+`edgekind`, flagged at A3). CPU is the working path; GPU is still blocked
+(Catch-all). Model at `DOCTREE_MODEL_PATH` (qwen3-4b-q4km.gguf).
+
+> **User direction (2026-06-02, to discuss in the morning):** build the *full*
+> pipeline for **both** the LLM path **and** the deterministic "Tier 1" path so
+> the two can be **benchmarked head-to-head at every stage** of extraction. Not
+> started — the user explicitly said to stop at the A8 request and confirm it
+> works first. See Catch-all backlog entry "Dual-pipeline benchmarking".
 
 ---
 
@@ -131,10 +138,29 @@ the live desktop window is the user's end test. GPU still CPU-only (Catch-all).
 - **A7** — live animated build + replay (frontend stream path).
   Commit `79034bc` · test `npx tsc --noEmit` + `npm run build` (both exit 0); runtime verified via dev handles (`__doctreePlayer`, `__doctreeBuildSequence`): sequence deterministic across runs and valid (no edge precedes its endpoints), 13 node + 18 edge events = 31; build visibly grows (7→13 nodes mid-run); Replay resets to 0 and regrows; "harbor"→2 matches after completion; done-state button reads "Replay" · src `src/build-player.ts` (`buildSequence`, `createBuildPlayer`), `src/main.ts` (empty-start + player wiring), `index.html` (Play/Pause + Replay).
   Note: build runs slower than the nominal 220 ms/step — per-step `graphData()` reheats + periodic `zoomToFit` load the main thread, delaying the timer; visually fine (graph grows over ~15 s). Ordering currently lives only in the frontend; A8 makes the Rust walker stream authoritative.
+- **A8** — Tauri app crate + frontend bridge: doc → deterministic walker → ordered build steps → animated 3D graph, **no LLM** (the structure-only path ADR-0001 requires the default build to stand on).
+  - **(1/3)** authoritative build ordering in Rust. Commit `8de06f3` · tests `crates/doctree-core/src/build.rs::tests::*` (6) · src `crates/doctree-core/src/build.rs` (`build_sequence`, `BuildStep`); frontend `src/build-player.ts` mirrors it.
+  - **(2/3)** Tauri app crate + bridge. Commit `0f6db4f` · tests `src-tauri/src/lib.rs::tests::*` (7, incl. `walk_params_*`, `walk_document_is_deterministic`, `build_steps_account_for_exactly_the_graph`, `build_steps_serialize_to_frontend_tagged_shape`) (`cargo test -p doctree-tauri`) · src `src-tauri/src/lib.rs` (`walk_document_impl`/`build_steps_impl` + `#[tauri::command]` `walk_document`/`build_steps`, `WalkParams`→`WalkOptions`, `run()`), `src-tauri/src/main.rs` (launcher), `src-tauri/tauri.conf.json` (id `games.milsoft.doctree`, frontendDist `../dist`), `src-tauri/capabilities/default.json` (`core:default`), `src/doc-source.ts` (Tauri live-walk vs browser-fixture fallback), `src/main.ts` (async `initBuild`).
+  - Verified: `cargo check -p doctree-tauri` clean (34 s, MSVC 14.50 — the Tauri dep tree builds fine; the toolchain failures are CUDA/Vulkan-specific, not general MSVC); full workspace **48 tests green with ZERO native deps** (core 34 + integration 2 + llm 5 + tauri 7); `npm run build` (tsc + vite) clean, `dist/` emitted for `generate_context!`; browser fixture fallback renders + animates live via dev handles (`__doctreeSource.origin === "fixture"`, 13 nodes/18 edges/31 steps, build grew to 13/31, `isTauri === false`).
+  - Note: the **live desktop window** (Tauri shell calling the real Rust walker over IPC) **cannot be launched/screenshotted in this headless environment** — that round-trip is the user's end test (`npm run tauri dev`). Everything else (compile, Rust unit tests, browser-fallback render) is verified above. GPU still CPU-only (see Catch-all).
 
 ---
 
 ## Catch-all backlog (off-topic discoveries — provenance noted, never fixed inline)
+
+- **Dual-pipeline benchmarking: run the full pipeline for BOTH the LLM path and
+  the deterministic "Tier 1" path, instrumented to compare them at every stage.**
+  _(raised by the user 2026-06-02 while A8 was finishing; to discuss in the
+  morning.)_ Intent: once the LLM wiring exists (B2+), we should be able to run a
+  document through both extraction strategies and benchmark them at each level of
+  the process (segmentation, entity/relationship extraction, final graph quality,
+  latency), not just at the end. The user noted "we should have built the full
+  pipeline for both" and wants to do this — but explicitly said **stop at the A8
+  request first and make sure everything works as intended**, so this is logged,
+  not started. Likely shape: a benchmark harness that drives `doctree-core` (Tier
+  1) and the gated `doctree-llm` path over the same fixtures and emits a
+  per-stage comparison. Sequencing TBD with the user (probably after B2/B3 give
+  us a working LLM path to compare against).
 
 - **GPU acceleration blocked by bleeding-edge toolchain — needs user sign-off on a
   fix path.** _(discovered while building B1's gated native LLM layer.)_ The CPU
