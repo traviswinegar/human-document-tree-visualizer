@@ -6,6 +6,7 @@ import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import type { GraphNode, GraphEdge, NodeKind, EdgeKind, Provenance } from "./types";
 import { nodeColor, nodeSize, edgeColor } from "./colors";
 import { buildSequence, createBuildPlayer, type BuildPlayer } from "./build-player";
+import { isPdf, extractPdfText } from "./pdf";
 import {
   loadBuildSource,
   searchByMeaning,
@@ -1160,9 +1161,46 @@ async function loadAndBuild(text?: string, label?: string): Promise<void> {
   }
 }
 
-// Read a dropped/selected file as text and rebuild from it. Phase 1 only ingests
-// plain text / markdown, so a naive readAsText is exactly right.
+// The set the file picker's `accept` filter allows: plain text, markdown, and
+// (new in #3) PDF. The drag-drop path bypasses `accept`, so it validates against
+// this before ingest — dropping a binary we can't read (e.g. a .docx or an image)
+// would otherwise be fed to readAsText and graph as mojibake.
+function isIngestible(file: File): boolean {
+  return (
+    isPdf(file) ||
+    file.type === "text/plain" ||
+    file.type === "text/markdown" ||
+    /\.(txt|md|markdown)$/i.test(file.name)
+  );
+}
+
+// Read a dropped/selected file and rebuild from it. Plain text / markdown go
+// through a naive readAsText; PDFs (#3 / ADR-0006) are routed through pdf.js in
+// the frontend — its heavy library loads lazily, only on the first PDF open — so
+// the same extraction serves the desktop and browser-WASM paths and the Rust
+// default build stays native-free.
 function ingestFile(file: File): void {
+  if (isPdf(file)) {
+    // Show progress immediately: clear the old doc + start the timer before the
+    // (potentially slow) extract, reusing loadAndBuild's pre-await clear via a
+    // dedicated "extracting…" beat so a big PDF doesn't read as a hang.
+    statsEl.textContent = `extracting ${file.name}…`;
+    extractPdfText(file)
+      .then((text) => {
+        if (text.trim().length === 0) {
+          // Scanned / image-only PDFs yield no text — there's no OCR (a
+          // documented backlog limit), so say so rather than graph an empty doc.
+          statsEl.textContent = `${file.name}: no extractable text (scanned PDF?)`;
+          return;
+        }
+        void loadAndBuild(text, file.name);
+      })
+      .catch((err) => {
+        console.error("PDF extraction failed:", err);
+        statsEl.textContent = `could not read ${file.name}`;
+      });
+    return;
+  }
   const reader = new FileReader();
   reader.onload = () => {
     const text = typeof reader.result === "string" ? reader.result : "";
@@ -1225,7 +1263,12 @@ window.addEventListener("drop", (e) => {
   dragDepth = 0;
   dropHintEl.classList.remove("active");
   const file = e.dataTransfer?.files?.[0];
-  if (file) ingestFile(file);
+  if (!file) return;
+  if (!isIngestible(file)) {
+    statsEl.textContent = `unsupported file: ${file.name} — drop a .txt, .md, or .pdf`;
+    return;
+  }
+  ingestFile(file);
 });
 
 void loadAndBuild();
