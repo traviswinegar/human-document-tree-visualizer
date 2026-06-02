@@ -112,16 +112,22 @@ the desktop app on a 650 KB / 400-page novel (18 437 nodes / 46 477 edges).** Pl
 clear-on-open + elapsed timer (ADR-free) → **#3** PDF ingestion (ADR-0006) → **#4**
 save/load/CRUD library (ADR-0007) → **#2** edge bundling (plan-doc now; ADR when the
 merged-geometry version lands). Substrate (the plan + ADR-0006 + ADR-0007) shipped
-as `Phase 5 #45` (commit `5b54e0d`). **#1 just landed (`Phase 5 #46`, commit
-`36b3a56`):** `loadAndBuild` now clears the canvas + sidebar + stats panel *before*
+as `Phase 5 #45` (commit `5b54e0d`). **#1 landed (`Phase 5 #46`, commit
+`36b3a56`):** `loadAndBuild` clears the canvas + sidebar + stats panel *before*
 awaiting the walk (the old graph no longer lingers through a slow semantic walk
 looking like a hang), and a live `#elapsed` readout in the left rail ticks from
 open through walk → build → semantic-weave and freezes at the total (stops on the
 structural `done`, or — when a model-backed delta is in flight — in that delta's
-`.finally`). Frontend-only, native-free. **Next: #3 (PDF ingestion via frontend
-`pdfjs-dist`, dynamically imported — ADR-0006).** Then #4, then #2. The standing
-autonomous mandate covers this whole phase (test at the end, commit locally, never
-push). Below is the prior position, retained as history.
+`.finally`). **#3 just landed (`Phase 5 #48`, commit `7ec0dcb`):** PDF ingestion
+via frontend `pdfjs-dist` (ADR-0006) — new `src/pdf.ts` (`isPdf` + `extractPdfText`,
+dynamically importing pdf.js so it stays out of the initial bundle; the build proves
+the split — `pdf-*.js` 421 kB + `pdf.worker.min-*.mjs` 1.2 MB are their own lazy
+chunks, `index-*.js` unchanged); `ingestFile` branches on `isPdf`, the picker
+`accept` gains `.pdf`, and the drag-drop path validates type first. All frontend,
+native-free. **Next: #4 (save/load/CRUD library — desktop Tauri commands + a
+frontend Save action / Library modal — ADR-0007).** Then #2 (edge bundling first
+cut). The standing autonomous mandate covers this whole phase (test at the end,
+commit locally, never push). Below is the prior position, retained as history.
 
 **[History] All build-order steps complete — #29 (frontend wiring) landed; only
 explicitly-deferred / blocked items remained at that point.** The autonomous "finish
@@ -359,6 +365,10 @@ autonomously):**
   Commit `36b3a56` · test `npx tsc --noEmit` (exit 0) + `npm run build` (exit 0 — 397 modules, `dist/` emitted; only the pre-existing >500 kB advisory) — the standing frontend gate (no JS test runner has ever existed; every A5–D4 / #29–#43 frontend phase verified this same way) · src `src/main.ts` (`loadAndBuild` now pauses the old player, cancels the trailing apply, clears search/details/doc-active, empties `graphData` + sidebar + stats-body, and calls the new `startElapsed()` **before** the `await loadBuildSource` — so the old doc vanishes the instant a new one opens instead of lingering through the walk; new `startElapsed`/`stopElapsed`/`fmtElapsed` drive a 100 ms-tick `#elapsed` readout; `startBuild` captures `hasPendingDelta` and stops the timer on the structural `done` only when no model-backed delta is in flight; the `pendingDelta.finally` stops it on the semantic path; the walk-failure `catch` freezes it too), `index.html` (`#elapsed` line at the top of `#stats-meta` + its CSS — tabular figures, a green `.running` state that cools to blue on freeze).
   Root cause (why it read as a hang): `loadAndBuild` set "walking…" text but left the *previous* document's full graph on screen, then `startBuild` only cleared `graphData` **after** `await loadBuildSource` resolved — so during a slow desktop semantic walk (tens of seconds to minutes on the 650 KB novel) the old graph sat there motionless with no elapsed feedback, indistinguishable from a freeze. The fix clears before the await and starts a timer that survives the whole walk → build → semantic-weave arc: it must *not* stop on the structural `done` when a `pendingDelta` is pending (the genuinely slow CPU phase is still running), so it freezes in that delta's `.finally` instead, and only stops on `done` for the pure structural path.
   Verified: `npx tsc --noEmit` exit 0; `npm run build` exit 0 (397 modules, `dist/` emitted; only the pre-existing >500 kB chunk advisory, unrelated). Frontend-only; default build stays **native-free** (pure TS — no new deps). The perceptual confirmation (old graph clears at once on open; the number ticks up through the walk and semantic weave; freezes at the total) is the user's desktop end test — the Tauri webview isn't screenshot/MCP-introspectable (the documented A5–D4 tooling limit).
+- **#48** — PDF ingestion via frontend pdf.js (Phase 5 item #3). **ADR-0006** (`docs/adr/ADR-0006-pdf-ingestion-frontend-pdfjs.md`) — decision = extract PDF text in the **frontend** via `pdfjs-dist` (Mozilla pdf.js), dynamically imported so the ~MB of library + worker stay out of the initial bundle; reverses an earlier verbal Rust-side lean for cross-path uniformity + the native-free invariant. User: "Yes, please implement PDF support."
+  Commit `7ec0dcb` · test `npx tsc --noEmit` (exit 0) + `npm run build` (exit 0 — 400 modules; **the pdf.js library code-splits into its own lazy chunk `dist/assets/pdf-*.js` 421 kB / gzip 125 kB and its worker into `dist/assets/pdf.worker.min-*.mjs` 1.2 MB, while the initial `index-*.js` is unchanged at 1369→1370 kB — proving pdf.js is NOT in the initial bundle**; only the pre-existing >500 kB advisory) — the standing frontend gate (no JS test runner has ever existed; every A5–D4 / #29–#46 frontend phase verified this same way) · src `src/pdf.ts` (NEW — `isPdf(file)` is a cheap `application/pdf`-or-`.pdf` MIME/extension check; `extractPdfText(file)` does `await import("pdfjs-dist")` + `await import("pdfjs-dist/build/pdf.worker.min.mjs?url")` then `getDocument({data}).promise`, walks each page's `getTextContent()` joining fragments on spaces / pdf.js `hasEOL` hints → newlines and pages on a blank line, collapses whitespace, and tears the worker down via the **loading task's** `destroy()` — `PDFDocumentProxy` has no `destroy` in v6, only `cleanup`), `src/main.ts` (`import { isPdf, extractPdfText } from "./pdf"`; `ingestFile` branches `isPdf` → `extractPdfText` → `loadAndBuild` with an "extracting…" beat + an empty-text "scanned PDF?" message, else the unchanged `readAsText`; new `isIngestible(file)` guards the drag-drop path, which bypasses the picker `accept`), `index.html` (picker `accept` gains `.pdf`/`application/pdf`; drop-hint text updated), `package.json`/`package-lock.json` (`pdfjs-dist@6.0.227`).
+  Root cause / design (why frontend, not Rust): the app previously ingested only `.txt`/`.md` via `readAsText`, and dragging a PDF in (drag bypasses `accept`) fed the binary container to `readAsText` → mojibake graph, no crash. PDF is a real parse (xref tables, FlateDecode streams, font→Unicode maps). Doing it in the frontend with pdf.js means **one** implementation serves both render paths (desktop Tauri webview + browser-WASM) and the Rust default build is untouched (native-free — ADR-0001). A Rust-side `pdf-extract`/`lopdf` was rejected: `wasm32` compatibility is uncertain (most PDF crates pull non-wasm deps), so it would break the browser walker or force a second impl, and it adds a heavy dep to the path we keep lean.
+  Verified: `npx tsc --noEmit` exit 0 (caught + fixed a v6 API drift mid-implementation: `destroy()` lives on `PDFDocumentLoadingTask`, not `PDFDocumentProxy`); `npm run build` exit 0 with the code-split proven above. The new dep is frontend-only (`pdfjs-dist` is pure JS/wasm in the browser) — the **Rust** default build is unchanged and stays native-free. The perceptual confirmation (drop a real PDF → text extracts → graph builds; a scanned PDF reports "no extractable text") is the user's desktop end test — the Tauri webview isn't screenshot/MCP-introspectable (the documented A5–D4 tooling limit).
 
 ---
 
