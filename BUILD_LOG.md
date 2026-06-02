@@ -509,6 +509,56 @@ autonomously):**
   triple. Flagged desktop-only-untested as planned (the live model/embedder run is
   the user's end test — the Tauri window can't be exercised headlessly).
 
+- **Phase 5 carry-forward backlog (4 items, none started — deferred by the plan,
+  not bugs).** _(discovered while planning Phase 5, recorded in
+  `docs/plans/PLAN-phase5-save-pdf-bundling.md` "Backlog discovered while planning";
+  surfaced here now that the plan is archived so they don't live only in a
+  shipped-and-archived doc.)_ Each is a clean future feature, sequenceable on its
+  own:
+  - **Animate / replay a *saved* graph.** `restoreSavedDoc` (#50) loads a saved
+    graph **static** — it seeds positions + freezes the sim (`cooldownTicks(0)`)
+    and presents the chip as a completed build (`player = null`), so there is no
+    build player to scrub/replay. A future pass would reconstruct a `BuildPlayer`
+    from the saved `nodes`/`edges` (their stored order is already a valid build
+    sequence) so a reopened graph can re-animate its growth, not just appear.
+  - **Browser-path persistence (IndexedDB) + export/import to a file.** The #50
+    library is **desktop-only** (gated on `isTauri()`, writes to `app_data_dir`).
+    The public browser/WASM build can't save. A future pass would persist saved
+    docs to IndexedDB in the browser and add export/import of a `*.doctree.json`
+    to/from an arbitrary path on both paths (the opaque-`Value` format already
+    makes the file portable).
+  - **OCR for scanned PDFs.** #48's `extractPdfText` pulls the text *layer* via
+    pdf.js; a scanned/image-only PDF has none, so it reports "no extractable text"
+    (documented limit in ADR-0006). A future pass would run OCR (e.g. Tesseract /
+    `tesseract.js`) on page rasters when the text layer is empty.
+  - **Full merged-geometry hierarchical bundling + its ADR (the #52 follow-up).**
+    #52 shipped the cheap **curvature** first cut; the heavy version computes
+    lowest-common-ancestor control points once the force layout *settles* and
+    renders *all* bundled edges as a single merged `BufferGeometry` (one draw call,
+    not 46k objects), recomputed on settle/demand rather than per frame — static
+    saved graphs are its ideal case. Gets its own ADR when it lands (it's a
+    load-bearing render-architecture change, unlike the reversible styling of #52).
+
+- **LLM confirmation of low-confidence classifications (deferred by
+  [ADR-0005](docs/adr/ADR-0005-document-type-detection-runtime-gate.md)).**
+  _(scoped out of B5.)_ The document-type gate is a deterministic, native-free
+  classifier; on the fixtures it separates narrative / expository / structured
+  cleanly without a model, so an optional LLM *confirmation* step for
+  low-confidence verdicts was deferred. When wanted: on a low-confidence
+  `Classification`, ask the (already-loaded, desktop-only) model to confirm/correct
+  the class before routing — gated so the native-free default is unaffected. Not
+  started.
+
+- **Graph *navigation* lags on very large graphs ("nice to have", not blocking).**
+  _(capability note from the user while driving Phase 5 — the app already graphs
+  the 650 KB / 400-page novel at 18 437 nodes / 46 477 edges successfully; it's
+  orbit/zoom/pan interaction that gets heavy at that scale.)_ The #50 save/restore
+  (skip the re-walk + freeze the layout) and #52 bundling (fewer visually-competing
+  straight lines) both *mitigate* it, but the underlying render cost of ~46k edge
+  objects is unaddressed. The merged-geometry bundling above is the most direct
+  lever (one draw call vs 46k); other options (edge LOD / culling distant edges,
+  instanced node spheres) are unexplored. Explicitly user-flagged non-blocking.
+
 ---
 
 ## Recovery protocol (for the post-compaction self)
