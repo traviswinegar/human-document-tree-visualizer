@@ -50,6 +50,7 @@
         align-items: center;
       }
       #controls input,
+      #controls select,
       #controls button {
         font: inherit;
         font-size: 13px;
@@ -63,7 +64,14 @@
       #controls input::placeholder {
         color: #6b7a99;
       }
-      #controls input:focus {
+      #controls input:focus,
+      #controls select:focus {
+        border-color: #7aa2ff;
+      }
+      #controls select {
+        cursor: pointer;
+      }
+      #controls select:hover {
         border-color: #7aa2ff;
       }
       #controls button {
@@ -95,6 +103,28 @@
       }
       #routing .hint {
         color: #f0b86c;
+      }
+      /* #39 engagement: a gently pulsing line shown while the structural spine is
+         on screen but the slow model-backed semantic/embedding pass is still
+         running, so the wait reads as active work rather than a hang. */
+      #semantic-status {
+        font-size: 12px;
+        margin-top: 1px;
+        color: #f0a6c8; /* warm semantic hue, distinct from the cool routing line */
+      }
+      #semantic-status .pulse {
+        display: inline-block;
+        margin-right: 3px;
+        animation: semantic-pulse 1.1s ease-in-out infinite;
+      }
+      @keyframes semantic-pulse {
+        0%,
+        100% {
+          opacity: 0.35;
+        }
+        50% {
+          opacity: 1;
+        }
       }
 
       /* Playback is a compact, faint floating chip so it never competes with the
@@ -442,8 +472,15 @@
       <h1>human-document-tree</h1>
       <div class="meta" id="stats">loading…</div>
       <div class="meta" id="routing"></div>
+      <div class="meta hidden" id="semantic-status"></div>
     </div>
     <div id="controls">
+      <select id="layout" title="Layout method" aria-label="Layout method">
+        <option value="force">Force (3D)</option>
+        <option value="td">Tree · top-down</option>
+        <option value="lr">Tree · left-right</option>
+        <option value="radialout">Radial</option>
+      </select>
       <input
         id="search"
         type="search"

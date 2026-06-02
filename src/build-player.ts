@@ -49,6 +49,11 @@ export interface BuildPlayer {
   replay(): void;
   // Re-pace the animation. Takes effect immediately, even mid-build.
   setSpeed(intervalMs: number): void;
+  // Weave more steps onto the end of an in-flight (or already-finished) build.
+  // Used by the desktop hybrid path: the structural spine streams first, then the
+  // slow model-backed semantic/embedding delta is appended the moment it arrives,
+  // so the graph keeps growing instead of the user staring at a static spine.
+  append(events: BuildEvent[]): void;
   isPlaying(): boolean;
   isDone(): boolean;
 }
@@ -74,7 +79,11 @@ export interface BuildPlayerOptions {
 const FRAME_MS = 16;
 
 export function createBuildPlayer(opts: BuildPlayerOptions): BuildPlayer {
-  const { sequence, apply, onProgress } = opts;
+  const { apply, onProgress } = opts;
+  // A private, growable copy of the steps: append() extends it without mutating
+  // the caller's source array (main.ts also hands that same array to the dev
+  // handle), and replay() then re-runs the whole grown sequence (spine + delta).
+  const sequence = [...opts.sequence];
   // Mutable so the speed slider can re-pace a build already in flight.
   let intervalMs = opts.intervalMs;
   const nodes: GraphNode[] = [];
@@ -146,6 +155,24 @@ export function createBuildPlayer(opts: BuildPlayerOptions): BuildPlayer {
     anchorStep = step;
   }
 
+  // Extend the build with late-arriving steps (the semantic/embedding delta on the
+  // desktop hybrid path). Re-anchor to "now" so the new tail animates at the
+  // current pace instead of dumping in one frame — the spine usually finishes long
+  // before the model does — and restart the frame timer if the build had already
+  // completed. A paused build stays paused (the user is in control); the appended
+  // steps will reveal on the next play/toggle.
+  function append(events: BuildEvent[]): void {
+    if (events.length === 0) return;
+    const wasDone = step >= sequence.length;
+    for (const ev of events) sequence.push(ev);
+    anchorTime = performance.now();
+    anchorStep = step;
+    if (wasDone && timer === null) {
+      timer = window.setInterval(tick, FRAME_MS);
+    }
+    report();
+  }
+
   return {
     play,
     pause,
@@ -155,6 +182,7 @@ export function createBuildPlayer(opts: BuildPlayerOptions): BuildPlayer {
       play();
     },
     setSpeed,
+    append,
     isPlaying: () => timer !== null,
     isDone: () => step >= sequence.length,
   };

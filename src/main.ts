@@ -34,6 +34,8 @@ const withAlpha = (hex: string, a: number): string => {
 
 const container = document.getElementById("graph")!;
 const statsEl = document.getElementById("stats")!;
+const semanticStatusEl = document.getElementById("semantic-status")!;
+const layoutEl = document.getElementById("layout") as HTMLSelectElement;
 const searchEl = document.getElementById("search") as HTMLInputElement;
 const searchCountEl = document.getElementById("search-count")!;
 const meaningSearchEl = document.getElementById("meaning-search") as HTMLInputElement;
@@ -128,7 +130,13 @@ const graph = new ForceGraph3D(container, { controlType: "orbit" })
   // the bigger win is throttling the apply rate (applyIntervalForSize, below).
   .d3VelocityDecay(0.45)
   .cooldownTime(12000)
-  .warmupTicks(0);
+  .warmupTicks(0)
+  // The layout dropdown can switch to a hierarchical (DAG) layout, but the graph
+  // is only tree-like in its spine — semantic cross-links (interacts_with,
+  // co_occurs_with, similarity) introduce cycles. A no-op onDagError tells
+  // 3d-force-graph to tolerate them (skip the offending links for depth
+  // assignment) instead of throwing and freezing the layout.
+  .onDagError(() => {});
 
 // --- Keep the final layout open (don't collapse the snakes into a ball) ----
 // A force-directed graph relaxes toward its minimum-energy shape. With d3's
@@ -154,6 +162,30 @@ chargeForce?.strength?.(CHARGE_STRENGTH);
 chargeForce?.distanceMax?.(CHARGE_MAX_DISTANCE);
 const linkForce = graph.d3Force("link") as ForceTunable | undefined;
 linkForce?.distance?.(LINK_DISTANCE);
+
+// --- Layout dropdown -------------------------------------------------------
+// The default open force layout (above) is great for seeing the *shape* of the
+// whole graph, but a long structural document also reads well as a hierarchy. The
+// dropdown switches 3d-force-graph between the free force layout and a few DAG
+// modes (direction comes from the part_of / precedes edges); semantic cross-links
+// that would form cycles are tolerated via the onDagError no-op set above.
+type LayoutMode = "force" | "td" | "lr" | "radialout";
+
+function applyLayout(mode: LayoutMode): void {
+  if (mode === "force") {
+    // dagMode(null) returns to the free 3D force layout. The lib accepts null at
+    // runtime to disable hierarchy, though its typings only list the active modes.
+    (graph.dagMode as (m: null) => unknown)(null);
+    graph.numDimensions(3);
+  } else {
+    graph.numDimensions(3).dagLevelDistance(mode === "radialout" ? 44 : 60).dagMode(mode);
+  }
+  graph.d3ReheatSimulation();
+  // Let the new layout take a few ticks, then frame it.
+  window.setTimeout(() => graph.zoomToFit(700, 80), 450);
+}
+
+layoutEl.addEventListener("change", () => applyLayout(layoutEl.value as LayoutMode));
 
 // --- Bloom glow ------------------------------------------------------------
 // The single biggest "the graph is so dark" lever: an UnrealBloom pass makes the
@@ -564,6 +596,14 @@ function renderRouting(source: BuildSource): void {
   routingEl.innerHTML = html;
 }
 
+// Engagement status (#39): while the structural spine is on screen but the slow,
+// CPU-bound model-backed extraction is still running in the background, surface a
+// gently pulsing "weaving…" line so the wait reads as active work, not a hang.
+function setSemanticPending(on: boolean, label = "weaving semantic layer…"): void {
+  semanticStatusEl.classList.toggle("hidden", !on);
+  semanticStatusEl.innerHTML = on ? `<span class="pulse">✦</span> ${esc(label)}` : "";
+}
+
 searchEl.addEventListener("input", runSearch);
 searchEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && matched.size > 0) {
@@ -668,6 +708,7 @@ function startBuild(source: BuildSource): void {
   sidebarDocEl.innerHTML = '<div class="doc-empty">building…</div>';
   statsEl.textContent = `${source.nodeCount} nodes · ${source.edgeCount} edges (${source.origin})`;
   renderRouting(source); // B5 — surface the class + resolved pipeline / downgrade
+  setSemanticPending(false); // cleared now; turned on below if a delta is pending
   // B4 — offer "find by meaning" only on a build that can actually embed.
   const meaningOn = Boolean(source.routing?.capabilities.vectordb);
   meaningSearchEl.classList.toggle("hidden", !meaningOn);
@@ -752,6 +793,35 @@ function startBuild(source: BuildSource): void {
   });
   player = p;
   p.play();
+
+  // #39 — engagement: the structural spine is streaming in above. If a slow,
+  // model-backed semantic/embedding build is running in the background, weave its
+  // delta onto the live graph the instant it finishes, and keep the user posted
+  // (CPU inference can take tens of seconds) instead of leaving a static spine.
+  if (source.pendingDelta) {
+    const weaving =
+      source.routing?.resolvedPipeline === "embedded_build"
+        ? "computing similarity edges…"
+        : "weaving semantic layer…";
+    setSemanticPending(true, weaving);
+    source.pendingDelta
+      .then((delta) => {
+        if (player !== p) return; // a newer build replaced us mid-extraction
+        if (delta.fellBack) {
+          source.fellBack = true;
+          renderRouting(source); // now show "no model on disk; using the spine"
+        } else if (delta.events.length > 0) {
+          p.append(delta.events);
+          source.nodeCount += delta.nodeCount;
+          source.edgeCount += delta.edgeCount;
+          statsEl.textContent = `${source.nodeCount} nodes · ${source.edgeCount} edges (${source.origin})`;
+        }
+      })
+      .catch((err) => console.error("semantic delta failed:", err))
+      .finally(() => {
+        if (player === p) setSemanticPending(false);
+      });
+  }
 
   // Dev-only handle so the running 3D scene is inspectable from the page console
   // / preview tooling (WebGL canvases can't be verified via readPixels under the
