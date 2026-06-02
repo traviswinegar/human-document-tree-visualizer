@@ -33,3 +33,9 @@ anyhow.workspace = true
 # graph stays native-free unless a feature above turns it on. Path dep on the
 # user's shared sibling crate — consumed read-only, never modified (ADR-0001).
 momusdev_llm = { path = "E:/Development/momusdev-packages/momusdev_llm", optional = true, default-features = false }
+
+[dev-dependencies]
+# Test-only: the live extraction test deserializes the model's JSON back into the
+# schema to prove it is schema-valid by construction. Pure Rust (no native deps),
+# so it never touches the ADR-0001 runtime decoupling invariant.
+serde_json.workspace = true

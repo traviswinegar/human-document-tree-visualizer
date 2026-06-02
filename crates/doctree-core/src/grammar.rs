@@ -32,15 +32,24 @@ use std::collections::HashSet;
 /// `hex` references instead.
 pub const GRAPH_GBNF: &str = r##"# human-document-tree — semantic extraction grammar
 # Output deserializes into doctree_core::schema::Graph by construction.
-root ::= ws graph ws
+#
+# Whitespace-free by design. An earlier revision threaded an optional `ws` rule
+# (`ws ::= ([ \t\n] ws)?`) through every position, including a leading `root ::=
+# ws graph ws`. Under greedy sampling that let the model satisfy the grammar by
+# emitting newlines *indefinitely* before committing to `{`, so it filled the
+# whole token budget with whitespace and `strip_chatml_tokens` trimmed the result
+# to the empty string (the "0 output bytes" bug). Forbidding whitespace entirely
+# masks those tokens out of the sampler, so the only legal first token is `{` —
+# the model cannot stall. Compact JSON parses identically to pretty JSON.
+root ::= graph
 
-graph ::= "{" ws "\"nodes\"" ws ":" ws nodelist ws "," ws "\"edges\"" ws ":" ws edgelist ws "}"
+graph ::= "{" "\"nodes\"" ":" nodelist "," "\"edges\"" ":" edgelist "}"
 
-nodelist ::= "[" ws ( node ( ws "," ws node )* )? ws "]"
-node ::= "{" ws "\"id\"" ws ":" ws string ws "," ws "\"kind\"" ws ":" ws nodekind ws "," ws "\"label\"" ws ":" ws string ws "}"
+nodelist ::= "[" ( node ( "," node )* )? "]"
+node ::= "{" "\"id\"" ":" string "," "\"kind\"" ":" nodekind "," "\"label\"" ":" string "}"
 
-edgelist ::= "[" ws ( edge ( ws "," ws edge )* )? ws "]"
-edge ::= "{" ws "\"source\"" ws ":" ws string ws "," ws "\"target\"" ws ":" ws string ws "," ws "\"kind\"" ws ":" ws edgekind ws "}"
+edgelist ::= "[" ( edge ( "," edge )* )? "]"
+edge ::= "{" "\"source\"" ":" string "," "\"target\"" ":" string "," "\"kind\"" ":" edgekind "}"
 
 nodekind ::= "\"character\"" | "\"place\"" | "\"concept\"" | "\"event\"" | "\"object\"" | "\"group\""
 edgekind ::= "\"mentions\"" | "\"interacts_with\"" | "\"located_in\"" | "\"relates_to\"" | "\"causes\"" | "\"precedes\""
@@ -48,7 +57,6 @@ edgekind ::= "\"mentions\"" | "\"interacts_with\"" | "\"located_in\"" | "\"relat
 string ::= "\"" char* "\""
 char ::= [^"\\] | "\\" ( ["\\/bfnrt] | "u" hex hex hex hex )
 hex ::= [0-9a-fA-F]
-ws ::= ([ \t\n] ws)?
 "##;
 
 /// The semantic node `kind` tags the grammar permits (mirrors the semantic arm

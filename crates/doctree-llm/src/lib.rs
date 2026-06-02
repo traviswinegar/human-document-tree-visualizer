@@ -42,6 +42,15 @@ pub const PROMPT_DOC_BUDGET_BYTES: usize = 8_192;
 /// attach `mentions` edges to, so the semantic layer grounds onto the spine
 /// instead of floating free. Pure and native-free: prompt construction needs no
 /// model, so it is fully unit-testable without the `llm` feature.
+///
+/// The prompt is wrapped in **ChatML** — a `system` turn (the instructions), a
+/// `user` turn (the anchored document), and an *open* `assistant` turn that ends
+/// the string. This mirrors `momusdev_llm`'s proven `extract_command` pattern and
+/// is load-bearing for the grammar: priming an open assistant turn makes the
+/// model commit to its first JSON token immediately instead of warming up with
+/// prose/whitespace. Together with the now whitespace-free [`graph_extraction_grammar`]
+/// it cures the "0 output bytes" stall (the model could otherwise satisfy the old
+/// `root ::= ws graph ws` grammar by emitting newlines until the budget ran out).
 pub fn build_extraction_prompt(spine: &doctree_core::Graph) -> String {
     use doctree_core::NodeKind;
 
@@ -79,7 +88,7 @@ pub fn build_extraction_prompt(spine: &doctree_core::Graph) -> String {
     let node_kinds = doctree_core::grammar::SEMANTIC_NODE_KINDS.join("|");
     let edge_kinds = doctree_core::grammar::SEMANTIC_EDGE_KINDS.join("|");
 
-    format!(
+    let instructions = format!(
         "You are a precise literary-analysis engine. Read the DOCUMENT and extract its \
 semantic graph: the characters, places, concepts, events, objects, and groups in the \
 narrative, plus the relationships between them.\n\n\
@@ -90,8 +99,18 @@ where <slug> is a short lowercase identifier (e.g. \"char:mara\", \"place:cove\"
 - Ground entities in the text: when a sentence introduces or refers to an entity, add a \
 \"mentions\" edge from that sentence's bracketed anchor id (e.g. \"sent:3\") to the entity id.\n\
 - Reuse the same entity id everywhere that entity appears; do not duplicate it.\n\
-- Extract only what the text supports — do not invent entities or relationships.\n\n\
-DOCUMENT (each line is prefixed with its anchor id):\n{body}"
+- Extract only what the text supports — do not invent entities or relationships."
+    );
+
+    // ChatML envelope with an OPEN assistant turn. The open turn primes the model
+    // to emit its JSON answer immediately (mirrors momusdev_llm's extract_command),
+    // which — paired with the whitespace-free grammar — prevents the leading-
+    // whitespace stall. `body` already ends in a newline, so the user turn closes
+    // cleanly as `…\n<|im_end|>`.
+    format!(
+        "<|im_start|>system\n{instructions}\n<|im_end|>\n\
+<|im_start|>user\nDOCUMENT (each line is prefixed with its anchor id):\n{body}<|im_end|>\n\
+<|im_start|>assistant\n"
     )
 }
 
@@ -593,6 +612,44 @@ mod tests {
     }
 
     #[test]
+    fn extraction_prompt_is_chatml_with_open_assistant_turn() {
+        // Regression guard for the "0 output bytes" stall: the prompt must wrap
+        // the instructions/document in ChatML and END with an *open* assistant
+        // turn, so the model commits to its first JSON token instead of warming
+        // up with whitespace.
+        use doctree_core::{Graph, Node, NodeKind, Span};
+        let mut spine = Graph::new();
+        spine.push_node(
+            Node::structural("sent:1", NodeKind::Sentence, "Mara found a letter.")
+                .with_text("Mara found a letter.")
+                .with_span(Span::new(0, 20)),
+        );
+        let p = build_extraction_prompt(&spine);
+
+        // Turns appear in order: system → user → assistant.
+        let i_sys = p.find("<|im_start|>system").expect("system turn");
+        let i_user = p.find("<|im_start|>user").expect("user turn");
+        let i_asst = p.find("<|im_start|>assistant").expect("assistant turn");
+        assert!(i_sys < i_user && i_user < i_asst, "turns must be in order");
+        // The assistant turn is left OPEN — no content, no closing tag.
+        assert!(
+            p.trim_end().ends_with("<|im_start|>assistant"),
+            "assistant turn must be open to prime immediate JSON output, got tail: {:?}",
+            &p[p.len().saturating_sub(40)..]
+        );
+        // Instructions live in the system turn; the document in the user turn.
+        let i_engine = p
+            .find("precise literary-analysis engine")
+            .expect("instructions");
+        let i_doc = p.find("[sent:1] Mara found a letter.").expect("document");
+        assert!(
+            i_sys < i_engine && i_engine < i_user,
+            "instructions belong to the system turn"
+        );
+        assert!(i_user < i_doc && i_doc < i_asst, "document belongs to the user turn");
+    }
+
+    #[test]
     fn extraction_prompt_respects_the_doc_budget() {
         use doctree_core::{Graph, Node, NodeKind, Span};
         let mut spine = Graph::new();
@@ -734,5 +791,68 @@ mod tests {
         assert_eq!(g, doctree_core::GRAPH_GBNF, "must be the core crate's grammar verbatim");
         // And it must actually be valid GBNF per the core linter.
         assert!(doctree_core::lint_gbnf(g).is_ok(), "extraction grammar must lint clean");
+    }
+
+    /// Live demonstration of the "0 output bytes" bug and its fix. Needs a
+    /// multi-GB local GGUF, so it is `#[ignore]`d and only compiled under the
+    /// `llm` feature. Run it explicitly once the fix is in:
+    ///   `DOCTREE_MODEL_PATH=… cargo test -p doctree-llm --features llm -- --ignored live_extraction`
+    /// Before the fix (whitespace grammar + raw prompt) this returned an empty
+    /// string; after it (whitespace-free grammar + ChatML open assistant turn) it
+    /// returns schema-valid `{nodes,edges}` JSON with at least one entity.
+    #[cfg(feature = "llm")]
+    #[test]
+    #[ignore = "needs a local GGUF model; set DOCTREE_MODEL_PATH and run with --features llm -- --ignored"]
+    fn live_extraction_yields_nonempty_schema_valid_graph() {
+        use doctree_core::{Graph, Node, NodeKind, Span};
+
+        let config = LlmConfig::from_env();
+        if config.resolve_model_path().is_err() {
+            eprintln!("skipping live_extraction: DOCTREE_MODEL_PATH not set");
+            return;
+        }
+        let engine = Engine::load(&config).expect("load GGUF model");
+
+        let mut spine = Graph::new();
+        spine.push_node(
+            Node::structural(
+                "sent:1",
+                NodeKind::Sentence,
+                "Mara found a letter in the cove.",
+            )
+            .with_text("Mara found a letter in the cove.")
+            .with_span(Span::new(0, 32)),
+        );
+        spine.push_node(
+            Node::structural(
+                "sent:2",
+                NodeKind::Sentence,
+                "She feared Vane would betray the crew.",
+            )
+            .with_text("She feared Vane would betray the crew.")
+            .with_span(Span::new(33, 71)),
+        );
+
+        let prompt = build_extraction_prompt(&spine);
+        let completion = engine.extract_graph_json(&prompt).expect("extraction call");
+
+        // The exact failure this guards: the model used to fill the token budget
+        // with whitespace, which strip_chatml_tokens trimmed to "".
+        assert!(
+            !completion.text.trim().is_empty(),
+            "extraction must not be empty (the 0-byte whitespace-stall bug)"
+        );
+        // The grammar guarantees the bytes deserialize into the schema by
+        // construction — prove it end to end.
+        let graph: Graph = serde_json::from_str(completion.text.trim()).unwrap_or_else(|e| {
+            panic!(
+                "extraction must be schema-valid JSON: {e}\n--- raw output ---\n{}",
+                completion.text
+            )
+        });
+        assert!(
+            !graph.nodes.is_empty(),
+            "should extract at least one semantic entity from the passage"
+        );
     }
 }

@@ -2497,6 +2497,7 @@ dependencies = [
  "anyhow",
  "doctree-core",
  "momusdev_llm",
+ "serde_json",
 ]
 
 [[package]]
