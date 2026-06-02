@@ -1,48 +1,25 @@
-import type { DocGraph, GraphNode, GraphEdge, NodeKind } from "./types";
+import type { DocGraph, GraphNode, GraphEdge } from "./types";
 
 // A single step in the animated build: a node appearing, or an edge wiring two
-// already-present nodes. The walker (A8) will eventually emit these in real
-// discovery order; until then we synthesize a deterministic order from a graph.
+// already-present nodes. Mirrors `doctree_core::build::BuildStep` — the Rust
+// walker stream (A8) emits exactly this tagged shape over Tauri events.
 export type BuildEvent =
   | { kind: "node"; node: GraphNode }
   | { kind: "edge"; edge: GraphEdge };
 
-// Structure grows before meaning: the deterministic spine (section→…→term) lays
-// down first, then the LLM-style semantic overlay (characters, places, …) lights
-// up on top. Lower rank = earlier in the build.
-const KIND_RANK: Record<NodeKind, number> = {
-  section: 0,
-  paragraph: 1,
-  sentence: 2,
-  clause: 3,
-  quote: 4,
-  reference: 5,
-  term: 6,
-  character: 7,
-  place: 8,
-  object: 9,
-  event: 10,
-  concept: 11,
-  group: 12,
-};
-
 const idOf = (ref: string | { id: string }): string =>
   typeof ref === "object" ? ref.id : ref;
 
-// Deterministic build order: nodes by (kind rank, id); each edge is emitted the
-// moment both its endpoints are present, in declaration order. Same input →
-// same sequence (this is what makes replay faithful).
+// Deterministic build order — mirrors `doctree_core::build::build_sequence`:
+// preserve the input node order (the walker emits its spine in document order,
+// "from word one") and reveal each edge the instant both endpoints are present,
+// flushing danglers last. Same graph in ⇒ same sequence out (faithful replay).
 export function buildSequence(graph: DocGraph): BuildEvent[] {
-  const nodes = [...graph.nodes].sort((a, b) => {
-    const r = KIND_RANK[a.kind] - KIND_RANK[b.kind];
-    return r !== 0 ? r : a.id.localeCompare(b.id);
-  });
-
   const present = new Set<string>();
   const emitted = new Set<number>();
   const seq: BuildEvent[] = [];
 
-  for (const node of nodes) {
+  for (const node of graph.nodes) {
     seq.push({ kind: "node", node });
     present.add(node.id);
     graph.edges.forEach((edge, i) => {
