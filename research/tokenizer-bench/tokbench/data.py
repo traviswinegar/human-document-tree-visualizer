@@ -48,8 +48,13 @@ def split_boundaries(manifest: dict) -> Split:
 
 
 def load_arm_c(data_dir: str) -> np.ndarray:
-    """Arm C token ids (little-endian u16), concatenated in manifest order."""
+    """Arm-C-lite token ids (little-endian u16), concatenated in manifest order."""
     return np.fromfile(os.path.join(data_dir, "arm_c.u16"), dtype="<u2")
+
+
+def load_arm_c_body(data_dir: str) -> np.ndarray:
+    """Arm-C-lite body mask (u8: 1 = document body byte scored for BPB, 0 = marker)."""
+    return np.fromfile(os.path.join(data_dir, "arm_c.body"), dtype=np.uint8)
 
 
 def load_text_bytes(data_dir: str) -> bytes:
@@ -110,32 +115,31 @@ def tokens_per_byte_summary(data_dir: str, bpe_vocab: int = 8192) -> dict:
 
 
 def build_arm(data_dir: str, arm: str, bpe_vocab: int = 8192):
-    """Return `(train_ids, val_ids, vocab_size, val_text_bytes)` for an arm.
+    """Return `(train_ids, val_ids, vocab_size, val_text_bytes, val_body)` for an arm.
 
     1-D numpy token-id arrays, split at the shared doc-based train/val boundary.
-    `val_text_bytes` is the source-byte denominator for bits-per-byte.
+    `val_text_bytes` is the source-byte denominator for bits-per-byte. `val_body` is
+    the arm-C-lite body mask (1 = document byte scored for BPB) aligned to `val_ids`;
+    `None` for arms A and B (every position is text).
     """
     manifest = load_manifest(data_dir)
     split = split_boundaries(manifest)
     text = load_text_bytes(data_dir)
     if arm == "B":
         ids = arm_b_tokens(text)
-        return ids[: split.train_bytes], ids[split.train_bytes :], 256, split.val_bytes
+        return ids[: split.train_bytes], ids[split.train_bytes :], 256, split.val_bytes, None
     if arm == "C":
         ids = load_arm_c(data_dir)
-        return (
-            ids[: split.train_c_tokens],
-            ids[split.train_c_tokens :],
-            int(manifest["vocab_size_arm_c"]),
-            split.val_bytes,
-        )
+        body = load_arm_c_body(data_dir)
+        cut = split.train_c_tokens
+        return ids[:cut], ids[cut:], int(manifest["vocab_size_arm_c"]), split.val_bytes, body[cut:]
     if arm == "A":
         train_text = text[: split.train_bytes].decode("utf-8", errors="replace")
         val_text = text[split.train_bytes :].decode("utf-8", errors="replace")
         bpe = train_arm_a_bpe(train_text, bpe_vocab, save_dir=os.path.join(data_dir, "bpe"))
         train = np.asarray(bpe.encode(train_text).ids, dtype=np.int64)
         val = np.asarray(bpe.encode(val_text).ids, dtype=np.int64)
-        return train, val, bpe.get_vocab_size(), split.val_bytes
+        return train, val, bpe.get_vocab_size(), split.val_bytes, None
     raise ValueError(f"unknown arm {arm!r} (expected 'A', 'B', or 'C')")
 
 

@@ -19,7 +19,7 @@ import torch
 import torch.nn.functional as F
 
 from . import data as D
-from .bpb import BYTE_CEIL, bits_per_byte
+from .bpb import bits_per_byte
 from .model import GPT, GPTConfig
 
 
@@ -31,41 +31,48 @@ def get_batch(ids: np.ndarray, block: int, batch: int, device: str):
 
 
 @torch.no_grad()
-def eval_arm(model, val_ids, arm: str, val_bytes: int, block: int, device: str, eval_batch: int = 64):
-    """Full-coverage *batched* val eval: every target in [1, len) is scored exactly
-    once (non-overlapping windows; the last is padded and masked out). Returns
-    (bits_per_byte, mean_val_loss). Arm C scores only byte-token targets (text
-    positions); the BPB denominator is source bytes — counted positions for B/C,
-    `val_bytes` for the sub-word arm A."""
+def eval_arm(model, val_ids, arm: str, val_bytes: int, block: int, device: str,
+             val_body=None, eval_batch: int = 64):
+    """Full-coverage batched val eval: every target in [1, len) scored exactly once.
+    Returns (bits_per_byte, mean_val_loss). For arm C only the *document body* targets
+    (`val_body == 1`) count toward BPB — the structural markers are context, never
+    scored, so no marker/label text is credited. The denominator is the true
+    source-byte count (`val_bytes`) for every arm — what makes the vocabularies
+    comparable."""
     model.eval()
     n = len(val_ids)
     starts = list(range(0, n - 1, block))
     total_nats = total_loss = 0.0
-    total_tok = scored = 0
+    total_tok = 0
     for i in range(0, len(starts), eval_batch):
         chunk = starts[i : i + eval_batch]
         xs = torch.zeros(len(chunk), block, dtype=torch.long)
         ys = torch.zeros(len(chunk), block, dtype=torch.long)
         keep = torch.zeros(len(chunk), block, dtype=torch.bool)
+        textm = torch.zeros(len(chunk), block, dtype=torch.bool)
         for j, s in enumerate(chunk):
             e = min(s + block, n - 1)
             ln = e - s
             xs[j, :ln] = torch.from_numpy(val_ids[s:e].astype("int64"))
             ys[j, :ln] = torch.from_numpy(val_ids[s + 1 : e + 1].astype("int64"))
             keep[j, :ln] = True
-        xs, ys, keep = xs.to(device), ys.to(device), keep.to(device)
+            textm[j, :ln] = (
+                torch.from_numpy(val_body[s + 1 : e + 1].astype(bool))
+                if arm == "C"
+                else True
+            )
+        xs, ys = xs.to(device), ys.to(device)
+        keep, textm = keep.to(device), textm.to(device)
         logits, _ = model(xs)
         per = F.cross_entropy(
             logits.view(-1, logits.size(-1)), ys.view(-1), reduction="none"
         ).view(len(chunk), block)
-        text = keep & (ys < BYTE_CEIL) if arm == "C" else keep
+        text = keep & textm
         total_nats += float(per[text].sum())
-        scored += int(text.sum())
         total_loss += float(per[keep].sum())
         total_tok += int(keep.sum())
     model.train()
-    denom = val_bytes if arm == "A" else scored
-    return bits_per_byte(total_nats, denom), total_loss / max(total_tok, 1)
+    return bits_per_byte(total_nats, val_bytes), total_loss / max(total_tok, 1)
 
 
 def main() -> int:
@@ -83,7 +90,7 @@ def main() -> int:
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
-    train_ids, val_ids, vocab, val_bytes = D.build_arm(args.data_dir, args.arm)
+    train_ids, val_ids, vocab, val_bytes, val_body = D.build_arm(args.data_dir, args.arm)
     cfg = GPTConfig(vocab_size=vocab, block_size=args.block, dropout=args.dropout)
     model = GPT(cfg).to(args.device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=0.1)
@@ -108,7 +115,7 @@ def main() -> int:
             loss.backward()
             opt.step()
             if step % args.eval_every == 0 or step == args.steps:
-                bpb, vloss = eval_arm(model, val_ids, args.arm, val_bytes, args.block, args.device)
+                bpb, vloss = eval_arm(model, val_ids, args.arm, val_bytes, args.block, args.device, val_body=val_body)
                 if bpb < best_bpb:  # best-val = the fair point under a fixed compute budget
                     best_bpb, best_step = bpb, step
                     torch.save({"model": model.state_dict(), "cfg": cfg.__dict__, "arm": args.arm,
