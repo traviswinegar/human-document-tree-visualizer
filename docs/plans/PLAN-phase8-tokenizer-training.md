@@ -62,7 +62,19 @@ outcome.
 - **Done when:** all three datasets generate deterministically from the corpus, and
   the BPB unit test passes.
 
-### M2 — Model + training loop (needs the stack decision)
+> **M1 finding (2026-06-02 — exporter run on the Vault, commit `e5f2fc2`):** 360 docs
+> → 2,150,184 text bytes but **13,433,216 arm-C tokens (~6.25 tok/byte)**. The
+> lossless stream serializes every edge + node-id string in the trailer, so it is far
+> longer than the text (ADR-00013: "not compression"). **Methodological consequence
+> (refines ADR-00015's metric):** bits-per-byte must be computed over the
+> **text-representing positions** (arm C: the byte-token positions), normalized by
+> **text bytes** — *not* over the whole arm-C stream, or arm C is unfairly charged for
+> its structural bookkeeping. So the M5 "loss-masking" idea is part of M1's **primary**
+> metric, not just an ablation. If the full stream proves too bookkeeping-heavy, an
+> **"arm C-lite"** (inline structural markers, no full edge/id trailer) is the likely
+> refinement.
+
+### M2 — Model + training loop (PyTorch / nanoGPT-style)
 - One small decoder-only transformer (nanoGPT-scale), **config-driven so arch/depth/
   width/compute are identical across arms**; only vocab/embedding/head size vary
   (delta logged). Train/val split fixed and shared (by source bytes, so the split is
