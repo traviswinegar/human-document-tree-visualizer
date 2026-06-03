@@ -85,10 +85,13 @@ A GGUF model is discovered automatically next to the executable, in
 `<exe>/models/`, or in the app's data dir (see `docs/adr/ADR-00014`); no env var
 required.
 
-> **Note for external builders:** `doctree-llm` currently path-depends on a local
-> `momusdev_llm` crate that is not included in this repository. Only the **default,
-> native-free** build is reproducible from a fresh clone today; the gated `llm` /
-> `vectordb` features need that crate present.
+> **Note on the optional engine:** the `llm` / `vectordb` features use `momusdev_llm`,
+> a separate engine crate that is **not included** here. A fresh clone builds the
+> **default, native-free** app out of the box — an in-repo build stub
+> (`vendor/momusdev_llm`) stands in so resolution succeeds without the engine. To
+> build the LLM features, copy `.cargo/config.toml.example` to `.cargo/config.toml`
+> and point its `paths` at your local `momusdev_llm` checkout. See
+> [`docs/adr/ADR-00016`](docs/adr/ADR-00016-momusdev-llm-build-stub.md).
 
 ## Reversible tokenizer & research
 

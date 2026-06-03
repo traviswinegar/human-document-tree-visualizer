@@ -32,10 +32,14 @@ vectordb = ["dep:momusdev_llm", "momusdev_llm/vectordb", "dep:tokio"]
 doctree-core = { path = "../doctree-core" }
 anyhow.workspace = true
 
-# The local-LLM engine. Optional + default-features=false so the dependency
-# graph stays native-free unless a feature above turns it on. Path dep on the
-# user's shared sibling crate — consumed read-only, never modified (ADR-0001).
-momusdev_llm = { path = "E:/Development/momusdev-packages/momusdev_llm", optional = true, default-features = false }
+# The local-LLM engine — OPTIONAL + default-features=false so the dependency graph
+# stays native-free unless a feature above turns it on (ADR-0001). The committed path
+# points at an in-repo BUILD STUB (vendor/momusdev_llm) so a fresh public clone
+# resolves and builds native-free WITHOUT the private engine (ADR-00016). Build the
+# real llm/vectordb features by overriding the stub with the real crate locally via
+# `.cargo/config.toml` `paths` (see .cargo/config.toml.example). The engine is
+# consumed read-only, never modified.
+momusdev_llm = { path = "../../vendor/momusdev_llm", optional = true, default-features = false }
 
 # Tokio runtime for the sync `RagStore` wrapper to drive the async LanceDB
 # `VectorStore` via `block_on`. Optional + only in the `vectordb` feature, so the

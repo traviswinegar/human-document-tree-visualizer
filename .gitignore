@@ -42,6 +42,10 @@ research/tokenizer-bench/.venv/
 .env.*
 !.env.example
 
+# --- Local Cargo override (ADR-00016): carries a machine path to the real
+#     momusdev_llm engine; local-only. The committed .example documents it. ---
+.cargo/config.toml
+
 # --- Logs / scratch ---
 *.log
 *.tmp

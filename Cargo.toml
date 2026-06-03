@@ -4,6 +4,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/doctree-core", "crates/doctree-llm", "crates/doctree-wasm", "crates/corpus-export", "src-tauri"]
+# vendor/momusdev_llm is an in-repo BUILD STUB (ADR-00016), pulled in only as an
+# optional dependency of doctree-llm — not a project crate, so it is not a member.
+exclude = ["vendor/momusdev_llm"]
 
 [workspace.package]
 edition = "2021"

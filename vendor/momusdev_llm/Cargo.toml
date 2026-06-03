@@ -1,0 +1,17 @@
+[package]
+name = "momusdev_llm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "BUILD STUB for momusdev_llm (see docs/adr/ADR-00016). Exists only so this repo resolves and builds native-free WITHOUT the private engine crate. It is an OPTIONAL dependency of doctree-llm and is never compiled by the default build. To build the llm/vectordb features, override this stub with the real crate via .cargo/config.toml `paths`."
+
+# Mirror the feature names doctree-llm cascades to (`momusdev_llm/inference`, etc.)
+# so feature resolution stays valid. All no-ops here — the real crate provides the
+# behaviour once the local `paths` override replaces this stub.
+[features]
+default = []
+inference = []
+cuda = ["inference"]
+vulkan = ["inference"]
+vectordb = []

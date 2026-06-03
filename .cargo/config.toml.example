@@ -1,0 +1,9 @@
+# Local Cargo override (ADR-00016) — copy to `.cargo/config.toml` (gitignored) to
+# build the LLM / embedding features against the REAL momusdev_llm engine.
+#
+# `paths` replaces any dependency whose package name + version matches a crate found
+# at one of these local paths. Here it swaps the in-repo `vendor/momusdev_llm` build
+# stub for the real engine crate, so `--features llm,vectordb` compiles the real
+# llama.cpp / embedding backends. Point it at wherever momusdev_llm lives on your
+# machine. The default (no-feature) build does not need this.
+paths = ["E:/Development/momusdev-packages/momusdev_llm"]
