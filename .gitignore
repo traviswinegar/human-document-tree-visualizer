@@ -31,6 +31,12 @@ src/wasm/
 /data/
 *.db
 
+# --- tokenizer-bench research artifacts (belt-and-suspenders; the private source
+#     corpus, model checkpoints, and the Python venv must never be published) ---
+research/tokenizer-bench/data/
+research/tokenizer-bench/runs/
+research/tokenizer-bench/.venv/
+
 # --- Secrets / local env ---
 .env
 .env.*

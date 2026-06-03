@@ -1,10 +1,14 @@
 # tokenizer-bench artifacts — never commit the venv, datasets, or model weights.
+# (Comments MUST be on their own line — Git does not support inline `#` comments.)
 .venv/
 __pycache__/
 *.pyc
-data/            # exported per-arm token streams
-runs/            # training logs / metrics
-checkpoints/     # model weights
+# exported per-arm token streams — includes corpus.txt (the private source corpus)
+data/
+# training logs / metrics
+runs/
+# model weights
+checkpoints/
 *.pt
 *.bin
 .streamlit/secrets.toml
