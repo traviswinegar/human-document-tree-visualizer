@@ -1,0 +1,11 @@
+[package]
+name = "corpus-export"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Phase 8 / ADR-00015 M1: export a corpus into the tokenizer-bench arms — arm C (graph `encode` token-ids) plus the raw source text for arms A (BPE) and B (byte). Native-free; consumes doctree-core."
+
+[dependencies]
+doctree-core = { path = "../doctree-core" }
+serde.workspace = true
+serde_json.workspace = true
