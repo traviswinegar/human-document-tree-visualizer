@@ -12,12 +12,15 @@ Answer one question with evidence: **does our graph-aware tokenization
 switch (3 arms: BPE / byte / byte+graph). A clean null result is an acceptable
 outcome.
 
-## Open decision (blocks M2+, not M0/M1)
+## Decisions (settled)
 
-- **Training stack: PyTorch (recommended) vs Rust `candle`.** ADR-00015 §5. M0/M1
-  (data export + BPB evaluator design) are stack-agnostic and can start; the model
-  + training loop (M2) needs this settled. Default to PyTorch unless the user says
-  Rust-native.
+- **Stack:** PyTorch + a nanoGPT-style trainer (ADR-00015 §5; Karpathy's reference).
+- **Form:** a standalone **Streamlit** GUI app (ADR-00015 §6) — configure / launch /
+  watch-live / compare / browse tokens, separate from the Tauri app.
+- **Corpus:** the user's Obsidian Writing Vault `C:\Writing Vault`, curated to
+  authored prose (~358K words; `_Books`/`_Short Stories`/`_Ideas`/`Archive`/
+  `Campaigns`/`Exercises`/`_Poetry`), excluding `_Gemini Chats`, `_Templates`, and
+  Obsidian internals (ADR-00015 §4).
 
 ## Standing invariants (do not violate)
 
@@ -34,14 +37,19 @@ outcome.
 ## Milestones
 
 ### M0 — Subproject scaffold + reproducibility spine
-- `research/tokenizer-bench/` with a README stating the question, the 3 arms, BPB,
-  and the corpus; a fixed RNG-seed + config convention; `.gitignore` for
-  checkpoints/datasets (artifacts never committed).
-- Decide & record the stack (flip ADR-00015 to Accepted or supersede).
-- **Done when:** the subproject builds/installs and runs a "hello, CUDA is visible"
-  check on the 3060 Ti.
+- `research/tokenizer-bench/` (Python): `requirements.txt` (torch+CUDA, streamlit,
+  tokenizers), README stating the question / 3 arms / BPB / corpus, a fixed RNG-seed
+  + config convention, `.gitignore` for checkpoints/datasets (artifacts never
+  committed), and a minimal **Streamlit** app shell.
+- Verify the environment: Python + PyTorch import, **CUDA visible on the 3060 Ti**,
+  Streamlit launches.
+- **Done when:** `streamlit run` opens the app shell and a "torch sees CUDA" check
+  passes on the 3060 Ti.
 
 ### M1 — Datasets for the three arms + the BPB evaluator (test-first)
+- **Corpus loader:** read `C:\Writing Vault` `.md` files with the ADR-00015 §4
+  include/exclude curation (authored prose in; `_Gemini Chats`/`_Templates`/Obsidian
+  internals out); the exclude-list is config, not hard-coded.
 - **Exporter (in/near `doctree-core`, native-free):** walk each corpus document →
   `(doc, graph)` → emit, per document: (C) the `encode` token-id stream, (B) the raw
   UTF-8 byte stream, and the raw text for (A). Pin a round-trip test: the exported
