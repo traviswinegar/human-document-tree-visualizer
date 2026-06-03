@@ -109,6 +109,36 @@ def tokens_per_byte_summary(data_dir: str, bpe_vocab: int = 8192) -> dict:
     }
 
 
+def build_arm(data_dir: str, arm: str, bpe_vocab: int = 8192):
+    """Return `(train_ids, val_ids, vocab_size, val_text_bytes)` for an arm.
+
+    1-D numpy token-id arrays, split at the shared doc-based train/val boundary.
+    `val_text_bytes` is the source-byte denominator for bits-per-byte.
+    """
+    manifest = load_manifest(data_dir)
+    split = split_boundaries(manifest)
+    text = load_text_bytes(data_dir)
+    if arm == "B":
+        ids = arm_b_tokens(text)
+        return ids[: split.train_bytes], ids[split.train_bytes :], 256, split.val_bytes
+    if arm == "C":
+        ids = load_arm_c(data_dir)
+        return (
+            ids[: split.train_c_tokens],
+            ids[split.train_c_tokens :],
+            int(manifest["vocab_size_arm_c"]),
+            split.val_bytes,
+        )
+    if arm == "A":
+        train_text = text[: split.train_bytes].decode("utf-8", errors="replace")
+        val_text = text[split.train_bytes :].decode("utf-8", errors="replace")
+        bpe = train_arm_a_bpe(train_text, bpe_vocab, save_dir=os.path.join(data_dir, "bpe"))
+        train = np.asarray(bpe.encode(train_text).ids, dtype=np.int64)
+        val = np.asarray(bpe.encode(val_text).ids, dtype=np.int64)
+        return train, val, bpe.get_vocab_size(), split.val_bytes
+    raise ValueError(f"unknown arm {arm!r} (expected 'A', 'B', or 'C')")
+
+
 def _main(argv: list[str]) -> int:
     data_dir = argv[1] if len(argv) > 1 else "data"
     bpe_vocab = int(argv[2]) if len(argv) > 2 else 8192
