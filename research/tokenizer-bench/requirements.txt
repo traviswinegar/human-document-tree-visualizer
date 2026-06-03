@@ -1,0 +1,15 @@
+# tokenizer-bench (Phase 8 / ADR-00015) — Python dependencies.
+#
+# IMPORTANT: `pip install torch` pulls the CPU-only wheel. For GPU training on the
+# RTX 3060 Ti (driver 595.97, CUDA 13-era), install the CUDA build FIRST from the
+# PyTorch index, THEN this file:
+#
+#   python -m venv .venv ; .venv\Scripts\activate
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+#   pip install -r requirements.txt
+#
+# (If cu128 has no wheel for this Python/torch, try cu126 / cu124 / cu130.)
+torch>=2.5            # install the CUDA build via the index URL above, not the CPU default
+streamlit>=1.40       # the standalone GUI (ADR-00015 §6)
+tokenizers>=0.20      # arm A: train a BPE on the corpus
+numpy>=1.26

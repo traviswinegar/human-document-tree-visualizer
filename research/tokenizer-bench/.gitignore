@@ -1,0 +1,10 @@
+# tokenizer-bench artifacts — never commit the venv, datasets, or model weights.
+.venv/
+__pycache__/
+*.pyc
+data/            # exported per-arm token streams
+runs/            # training logs / metrics
+checkpoints/     # model weights
+*.pt
+*.bin
+.streamlit/secrets.toml
