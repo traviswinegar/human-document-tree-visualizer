@@ -1,0 +1,63 @@
+"""Bits-per-byte — the fair cross-tokenizer metric for tokenizer-bench (ADR-00015).
+
+Per-token perplexity is **not** comparable across vocabularies (a token covers a
+different amount of text in each arm), so every arm is scored in **bits per source
+byte**: the cross-entropy (in nats) the model spends predicting the *text*, divided
+by ln(2) and by the number of UTF-8 source bytes.
+
+The M1 subtlety (measured: arm C is ~6.25 tok/byte): arm C's stream interleaves text
+bytes with structural graph tokens. To measure how well the model predicts the
+*text* (not its graph bookkeeping), arm C is scored over its **byte-token positions
+only** (ids < 256, one source byte each). Arms A (BPE) and B (byte) score every
+predicted token; the denominator is the source byte length those tokens cover —
+derivable from the ids for byte-grounded arms (B, C), supplied from the decoded text
+for arm A (sub-words span a variable number of bytes).
+
+These functions are pure (no torch) so the metric is unit-tested independently of any
+model — the experiment's fairness machinery is what must be correct (ADR-00015
+pinned invariant).
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Iterable, Sequence
+
+# doctree-core tokenizer byte floor: ids 0..255 are literal source bytes (ADR-00013).
+BYTE_CEIL = 256
+
+
+def bits_per_byte(scored_nats: float, text_bytes: int) -> float:
+    """`(cross-entropy nats over the scored positions / ln 2) / source text bytes`.
+
+    Normalizing by *source bytes* (not tokens) is what makes arms with different
+    vocabularies directly comparable.
+    """
+    if text_bytes <= 0:
+        raise ValueError("text_bytes must be positive")
+    return (scored_nats / math.log(2)) / text_bytes
+
+
+def text_nats(per_token_nats: Sequence[float], target_ids: Sequence[int], arm: str) -> float:
+    """Sum the cross-entropy (nats) over the positions that represent *text*.
+
+    arm "C": only byte-token targets (id < 256); arms "A"/"B": every target.
+    """
+    if arm == "C":
+        return float(sum(n for n, t in zip(per_token_nats, target_ids) if t < BYTE_CEIL))
+    if arm in ("A", "B"):
+        return float(sum(per_token_nats))
+    raise ValueError(f"unknown arm {arm!r} (expected 'A', 'B', or 'C')")
+
+
+def text_bytes_from_ids(target_ids: Iterable[int], arm: str) -> int:
+    """Source byte count implied by the ids — valid only for byte-grounded arms.
+
+    arm "B": one byte per token; arm "C": one byte per byte-token (id < 256). Arm "A"
+    is sub-word and not byte-derivable — pass the true source byte count instead.
+    """
+    if arm == "C":
+        return sum(1 for t in target_ids if t < BYTE_CEIL)
+    if arm == "B":
+        return sum(1 for _ in target_ids)
+    raise ValueError("arm A is sub-word: supply the true source byte count, not ids")
