@@ -26,12 +26,48 @@ pub fn graph_extraction_grammar() -> &'static str {
     doctree_core::GRAPH_GBNF
 }
 
+/// The hard ceiling, in **tokens**, on a single extraction prompt — imposed by
+/// the engine, not the context window. `momusdev_llm` allocates its prompt-eval
+/// batch as `LlamaBatch::new(max_tokens.min(2048), 1)` and adds the **whole**
+/// prompt to that one batch in a single pass (no chunking) — `inference.rs:295`.
+/// So a prompt over 2048 tokens fails at `batch.add` with
+/// *"Batch add failed: Insufficient Space of 2048"*, **even though** the context
+/// window is 4096 and the engine's own length guard only checks
+/// `prompt < max_tokens` (4096). That guard is too lax for its batch; we can't
+/// change the shared crate, so we keep the prompt under this ceiling ourselves.
+/// (Logged as a Catch-all for the user: the engine should chunk the prompt across
+/// batches or guard against `min(max_tokens, 2048)`.)
+pub const PROMPT_BATCH_TOKEN_CEILING: usize = 2_048;
+
+/// Tokens of head-room left below [`PROMPT_BATCH_TOKEN_CEILING`] so that
+/// byte→token estimation error can never tip the real prompt over the batch.
+const PROMPT_TOKEN_SAFETY_MARGIN: usize = 256;
+
+/// Pessimistic bytes-per-token for the anchored prompt. qwen's BPE averages
+/// ~3.5–4 B/token on English prose, but the `[id]` anchor tags and punctuation
+/// tokenize denser, so we assume a conservative 3 B/token when converting the
+/// token ceiling into a byte budget — staying safely under the real rate.
+const PROMPT_CONSERVATIVE_BYTES_PER_TOKEN: usize = 3;
+
+/// Byte ceiling on the **entire** extraction prompt (preamble + anchored body)
+/// that guarantees it tokenizes to fewer than [`PROMPT_BATCH_TOKEN_CEILING`]
+/// tokens, derived from the safety margin and the conservative B/token rate.
+pub const PROMPT_MAX_TOTAL_BYTES: usize =
+    (PROMPT_BATCH_TOKEN_CEILING - PROMPT_TOKEN_SAFETY_MARGIN) * PROMPT_CONSERVATIVE_BYTES_PER_TOKEN;
+
+/// Bytes reserved within [`PROMPT_MAX_TOTAL_BYTES`] for the fixed ChatML envelope
+/// + instruction preamble + node/edge-kind lists (measured ~1 KB), so the doc
+/// body budget is what's left for the document itself.
+const PROMPT_PREAMBLE_RESERVE_BYTES: usize = 1_280;
+
 /// Soft cap on the anchored-document body inside an extraction prompt, in bytes.
-/// A single qwen3-4b context is ~4096 tokens (~16 KB); leaving headroom for the
-/// instruction preamble and the model's own output, ~8 KB of source keeps the
-/// whole exchange inside one window. Documents larger than this are truncated
-/// for now — proper chunked extraction is a follow-up (see BUILD_LOG backlog).
-pub const PROMPT_DOC_BUDGET_BYTES: usize = 8_192;
+/// **Bounded by the engine's 2048-token prompt batch, not the context window**
+/// (see [`PROMPT_BATCH_TOKEN_CEILING`]): the whole prompt must stay under
+/// [`PROMPT_MAX_TOTAL_BYTES`], so the body gets that minus the preamble reserve.
+/// Documents larger than this are truncated for now — proper chunked extraction
+/// is the real long-doc fix (see BUILD_LOG context-starvation backlog #71).
+pub const PROMPT_DOC_BUDGET_BYTES: usize =
+    PROMPT_MAX_TOTAL_BYTES - PROMPT_PREAMBLE_RESERVE_BYTES;
 
 /// Build the grammar-constrained extraction prompt for a document, given its
 /// deterministic spine [`doctree_core::Graph`] (B3).
@@ -1195,6 +1231,37 @@ mod tests {
             p.len() < PROMPT_DOC_BUDGET_BYTES + 2_000,
             "prompt should be bounded by the budget, got {} bytes",
             p.len()
+        );
+    }
+
+    #[test]
+    fn extraction_prompt_stays_under_the_batch_ceiling() {
+        // Regression for the live "Batch add failed: Insufficient Space of 2048"
+        // on the 400-page novel: momusdev_llm adds the WHOLE prompt to a single
+        // 2048-capacity batch (inference.rs:295), so an over-budget prompt crashes
+        // the semantic layer. We can't count real tokens native-free, so the doc
+        // budget must keep the entire prompt under PROMPT_MAX_TOTAL_BYTES — a
+        // conservative byte ceiling that guarantees < PROMPT_BATCH_TOKEN_CEILING
+        // tokens. Build a spine far larger than any single prompt can hold.
+        use doctree_core::{Graph, Node, NodeKind, Span};
+        let mut spine = Graph::new();
+        for i in 0..5000 {
+            let text =
+                format!("Sentence number {i} carries a fair amount of filler text to fill up the budget.");
+            let start = i * 90;
+            spine.push_node(
+                Node::structural(format!("sent:{i}"), NodeKind::Sentence, text.clone())
+                    .with_text(text)
+                    .with_span(Span::new(start, start + 80)),
+            );
+        }
+        let p = build_extraction_prompt(&spine);
+        assert!(
+            p.len() <= PROMPT_MAX_TOTAL_BYTES,
+            "extraction prompt is {} B; must stay <= {} B to fit the {}-token batch",
+            p.len(),
+            PROMPT_MAX_TOTAL_BYTES,
+            PROMPT_BATCH_TOKEN_CEILING
         );
     }
 
