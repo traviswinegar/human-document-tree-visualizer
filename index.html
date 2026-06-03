@@ -670,6 +670,57 @@
         color: #eaf2ff;
         font-weight: 600;
       }
+      /* Phase 7 #7 — the data-level diff of the reconstruction vs the original.
+         ADR-00013 makes reconstruction byte-exact by construction, so this proves
+         losslessness (0 differing bytes) on the happy path and pinpoints the first
+         diverging byte (hex + printable window) when an input graph is not pristine
+         walker output. */
+      #reconstruct-diff {
+        padding: 10px 16px;
+        border-bottom: 1px solid #1d2740;
+        font-size: 12.5px;
+        line-height: 1.55;
+        color: #cdd9f0;
+      }
+      #reconstruct-diff .rc-diff-head {
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        margin-bottom: 4px;
+      }
+      #reconstruct-diff .rc-same {
+        color: #8ad0a8;
+      }
+      #reconstruct-diff .rc-diff {
+        color: #ff8a8a;
+      }
+      #reconstruct-diff .rc-row {
+        font-variant-numeric: tabular-nums;
+      }
+      #reconstruct-diff .rc-row .k {
+        color: #9bb0d6;
+        margin-right: 5px;
+      }
+      #reconstruct-diff .rc-row .v {
+        color: #eaf2ff;
+        font-weight: 600;
+      }
+      #reconstruct-diff .rc-window {
+        margin-top: 8px;
+        font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+        font-size: 11.5px;
+        white-space: pre-wrap;
+        word-break: break-all;
+        background: #0b1120;
+        border: 1px solid #1d2740;
+        border-radius: 6px;
+        padding: 8px 10px;
+      }
+      #reconstruct-diff .rc-window .lbl {
+        color: #9bb0d6;
+      }
+      #reconstruct-diff .rc-window .hex {
+        color: #f0c674;
+      }
       #reconstruct-text {
         margin: 0;
         overflow: auto;
@@ -1025,6 +1076,7 @@
           <button id="reconstruct-close" type="button" title="Close (Esc)" aria-label="Close">×</button>
         </div>
         <div id="reconstruct-meta"></div>
+        <div id="reconstruct-diff"></div>
         <pre id="reconstruct-text"></pre>
       </div>
     </div>
