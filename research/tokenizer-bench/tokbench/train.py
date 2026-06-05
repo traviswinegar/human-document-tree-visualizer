@@ -78,12 +78,15 @@ def eval_arm(model, val_ids, arm: str, val_bytes: int, block: int, device: str,
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("data_dir")
-    ap.add_argument("arm", choices=["A", "B", "C"])
+    ap.add_argument("arm", choices=["A", "B", "C", "gpt2", "cl100k", "o200k", "llama"])
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--block", type=int, default=256)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--eval-every", type=int, default=100)
+    # Eval batch is separate + small by default: large-vocab industry tokenizers
+    # (cl100k ~100k, o200k ~200k) make the logits tensor huge, so a big eval batch OOMs.
+    ap.add_argument("--eval-batch", type=int, default=16)
     ap.add_argument("--dropout", type=float, default=0.0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=1337)
@@ -115,7 +118,8 @@ def main() -> int:
             loss.backward()
             opt.step()
             if step % args.eval_every == 0 or step == args.steps:
-                bpb, vloss = eval_arm(model, val_ids, args.arm, val_bytes, args.block, args.device, val_body=val_body)
+                bpb, vloss = eval_arm(model, val_ids, args.arm, val_bytes, args.block, args.device,
+                                      val_body=val_body, eval_batch=args.eval_batch)
                 if bpb < best_bpb:  # best-val = the fair point under a fixed compute budget
                     best_bpb, best_step = bpb, step
                     torch.save({"model": model.state_dict(), "cfg": cfg.__dict__, "arm": args.arm,

@@ -13,3 +13,10 @@ torch>=2.5            # install the CUDA build via the index URL above, not the 
 streamlit>=1.40       # the standalone GUI (ADR-00015 §6)
 tokenizers>=0.20      # arm A: train a BPE on the corpus
 numpy>=1.26
+# Industry-tokenizer baseline arms — benchmark OUR tokenizer vs the real published
+# ones (ADR-00015): tiktoken = GPT-2 / cl100k (GPT-3.5/4) / o200k (GPT-4o);
+# transformers + sentencepiece = Llama SentencePiece. First use downloads each
+# tokenizer's vocab (cached).
+tiktoken>=0.7
+transformers>=4.40
+sentencepiece>=0.2

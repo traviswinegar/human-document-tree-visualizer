@@ -114,6 +114,13 @@ def tokens_per_byte_summary(data_dir: str, bpe_vocab: int = 8192) -> dict:
     }
 
 
+# Real published industry tokenizers, for benchmarking OUR tokenizer against the
+# standard ones (ADR-00015). tiktoken covers the OpenAI family; HF transformers the
+# Llama/SentencePiece family. Imported lazily so the rest of the bench runs without them.
+_TIKTOKEN_ARMS = {"gpt2": "gpt2", "cl100k": "cl100k_base", "o200k": "o200k_base"}
+_HF_ARMS = {"llama": "hf-internal-testing/llama-tokenizer"}
+
+
 def build_arm(data_dir: str, arm: str, bpe_vocab: int = 8192):
     """Return `(train_ids, val_ids, vocab_size, val_text_bytes, val_body)` for an arm.
 
@@ -140,7 +147,27 @@ def build_arm(data_dir: str, arm: str, bpe_vocab: int = 8192):
         train = np.asarray(bpe.encode(train_text).ids, dtype=np.int64)
         val = np.asarray(bpe.encode(val_text).ids, dtype=np.int64)
         return train, val, bpe.get_vocab_size(), split.val_bytes, None
-    raise ValueError(f"unknown arm {arm!r} (expected 'A', 'B', or 'C')")
+    # Industry tokenizers: tokenize the corpus with their REAL published vocabulary,
+    # so we benchmark OUR tokenizer against the actual GPT/Llama ones.
+    train_text = text[: split.train_bytes].decode("utf-8", errors="replace")
+    val_text = text[split.train_bytes :].decode("utf-8", errors="replace")
+    if arm in _TIKTOKEN_ARMS:
+        import tiktoken
+
+        enc = tiktoken.get_encoding(_TIKTOKEN_ARMS[arm])
+        train = np.asarray(enc.encode_ordinary(train_text), dtype=np.int64)
+        val = np.asarray(enc.encode_ordinary(val_text), dtype=np.int64)
+        return train, val, enc.n_vocab, split.val_bytes, None
+    if arm in _HF_ARMS:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained(_HF_ARMS[arm])
+        train = np.asarray(tok.encode(train_text, add_special_tokens=False), dtype=np.int64)
+        val = np.asarray(tok.encode(val_text, add_special_tokens=False), dtype=np.int64)
+        return train, val, len(tok), split.val_bytes, None
+    raise ValueError(
+        f"unknown arm {arm!r} (expected A/B/C, one of {list(_TIKTOKEN_ARMS)}, or {list(_HF_ARMS)})"
+    )
 
 
 def _main(argv: list[str]) -> int:
