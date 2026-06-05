@@ -159,6 +159,65 @@ fn tokenize_stats(text: String, graph: Graph) -> TokenizeStats {
     tokenize_stats_impl(&text, &graph)
 }
 
+/// Tokenize result WITH the raw token-id stream — what gets written to a `.dttok`
+/// file (ADR-00018). [`TokenizeStats`] plus the ids.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenizeResult {
+    pub ids: Vec<u32>,
+    pub tokens: usize,
+    pub doc_bytes: usize,
+    pub vocab_size: u32,
+}
+
+/// Both projections recovered from a raw token-id stream (a `.dttok` file's `ids`):
+/// the byte-exact document and the exact graph (ADR-00018).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecodeResult {
+    pub text: String,
+    pub graph: Graph,
+    pub tokens: usize,
+}
+
+/// Tokenize `(text, graph)` to the raw id stream for export. Pure; native-free.
+pub fn tokenize_document_impl(text: &str, graph: &Graph) -> TokenizeResult {
+    let tokens = encode(text, graph);
+    let st = token_stats(text, &tokens);
+    TokenizeResult {
+        ids: tokens.ids().to_vec(),
+        tokens: st.tokens,
+        doc_bytes: st.doc_bytes,
+        vocab_size: st.vocab_size,
+    }
+}
+
+/// Decode a raw token-id stream back to BOTH projections — the byte-exact document
+/// and the exact graph — from the ids alone (not a re-encoded pair). Pure;
+/// native-free. A malformed stream yields the tokenizer's error, surfaced to the UI.
+pub fn decode_tokens_impl(ids: Vec<u32>) -> Result<DecodeResult, String> {
+    let tokens = doctree_core::Tokens(ids);
+    let text = decode_text(&tokens).map_err(|e| e.to_string())?;
+    let graph = doctree_core::decode_graph(&tokens).map_err(|e| e.to_string())?;
+    Ok(DecodeResult {
+        text,
+        graph,
+        tokens: tokens.len(),
+    })
+}
+
+/// Tauri command: tokenize `(text, graph)` to the raw id stream for a `.dttok` file.
+#[tauri::command]
+fn tokenize_document(text: String, graph: Graph) -> TokenizeResult {
+    tokenize_document_impl(&text, &graph)
+}
+
+/// Tauri command: decode a `.dttok` file's `ids` back to the document and the graph.
+#[tauri::command]
+fn decode_tokens(ids: Vec<u32>) -> Result<DecodeResult, String> {
+    decode_tokens_impl(ids)
+}
+
 // ---------------------------------------------------------------------------
 // B5 — document-type detection runtime gate.
 //
@@ -325,6 +384,8 @@ pub fn run() {
             build_steps,
             reconstruct_document,
             tokenize_stats,
+            tokenize_document,
+            decode_tokens,
             classify_document,
             llm::confirm_classification,
             llm::llm_status,
@@ -444,6 +505,27 @@ mod tests {
         assert_eq!(s.doc_bytes, r.doc_bytes);
         assert_eq!(s.vocab_size, r.vocab_size);
         assert_eq!(s.vocab_size, doctree_core::VOCAB_SIZE);
+    }
+
+    #[test]
+    fn decode_tokens_round_trips_doc_and_graph_from_ids_alone() {
+        // ADR-00018: decoding from the .dttok `ids` ALONE (not a re-encoded pair)
+        // recovers the byte-exact document AND the exact graph.
+        let g = walk_document_impl(DOC, None);
+        let tk = tokenize_document_impl(DOC, &g);
+        let d = decode_tokens_impl(tk.ids.clone()).unwrap();
+        assert_eq!(d.text, DOC, "decode_text from ids alone is byte-exact");
+        assert_eq!(d.graph, g, "decode_graph from ids alone equals the walked graph");
+        assert_eq!(d.tokens, tk.tokens);
+    }
+
+    #[test]
+    fn decode_tokens_errors_on_truncated_stream() {
+        // A clipped stream (missing its closing token) must surface an error, not panic.
+        let g = walk_document_impl(DOC, None);
+        let mut ids = tokenize_document_impl(DOC, &g).ids;
+        ids.pop();
+        assert!(decode_tokens_impl(ids).is_err());
     }
 
     #[test]

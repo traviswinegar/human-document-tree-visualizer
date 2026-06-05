@@ -91,6 +91,23 @@ fn reconstruct_graph_json(text: &str, graph_json: &str) -> Result<String, String
     serde_json::to_string(&decoded).map_err(|e| e.to_string())
 }
 
+/// Decode a raw token-id stream (a `.dttok` file's `ids`) back to BOTH projections —
+/// the byte-exact document and the exact graph — from the **ids alone** (not a
+/// re-encoded pair), so importing a token file reconstructs the doc and tree
+/// (ADR-00018). JSON `{text, graph, tokens}`. Host-testable core for `decodeTokens`.
+fn decode_tokens_json(ids_json: &str) -> Result<String, String> {
+    let ids: Vec<u32> = serde_json::from_str(ids_json).map_err(|e| e.to_string())?;
+    let tokens = doctree_core::Tokens(ids);
+    let text = decode_text(&tokens).map_err(|e| e.to_string())?;
+    let graph = decode_graph(&tokens).map_err(|e| e.to_string())?;
+    serde_json::to_string(&serde_json::json!({
+        "text": text,
+        "graph": graph,
+        "tokens": tokens.len(),
+    }))
+    .map_err(|e| e.to_string())
+}
+
 /// Install the panic hook so a Rust panic surfaces as `console.error` with a
 /// readable message instead of an opaque `unreachable executed`.
 #[wasm_bindgen(start)]
@@ -145,6 +162,13 @@ pub fn tokenize_graph(text: &str, graph_json: &str) -> Result<String, JsValue> {
 #[wasm_bindgen(js_name = reconstructGraph)]
 pub fn reconstruct_graph(text: &str, graph_json: &str) -> Result<String, JsValue> {
     reconstruct_graph_json(text, graph_json).map_err(|e| JsValue::from_str(&e))
+}
+
+/// Decode a `.dttok` file's `ids` (a JSON array of token ids) back to the document
+/// and graph, as a JSON string (`{"text":…,"graph":{…},"tokens":…}`).
+#[wasm_bindgen(js_name = decodeTokens)]
+pub fn decode_tokens(ids_json: &str) -> Result<String, JsValue> {
+    decode_tokens_json(ids_json).map_err(|e| JsValue::from_str(&e))
 }
 
 #[cfg(test)]
@@ -257,6 +281,20 @@ mod tests {
         let original: Value = serde_json::from_str(&graph_json).unwrap();
         let decoded: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(decoded, original);
+    }
+
+    /// ADR-00018: decoding from the `ids` ALONE recovers the byte-exact document AND
+    /// the exact graph — the `.dttok` file round-trip (not a re-encoded pair).
+    #[test]
+    fn decode_tokens_json_round_trips_from_ids_alone() {
+        let graph_json = walk_document_json(DOC, &WalkOptions::default()).unwrap();
+        let tok: Value =
+            serde_json::from_str(&tokenize_graph_json(DOC, &graph_json).unwrap()).unwrap();
+        let ids_json = serde_json::to_string(&tok["ids"]).unwrap();
+        let out: Value = serde_json::from_str(&decode_tokens_json(&ids_json).unwrap()).unwrap();
+        assert_eq!(out["text"].as_str().unwrap(), DOC, "doc recovered byte-exact from ids");
+        let original: Value = serde_json::from_str(&graph_json).unwrap();
+        assert_eq!(out["graph"], original, "graph recovered exactly from ids");
     }
 
     /// Malformed graph JSON surfaces as an `Err`, not a panic.
