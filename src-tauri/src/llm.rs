@@ -46,6 +46,21 @@ pub fn merge_semantic_onto_spine(mut spine: Graph, fragment: Graph) -> Graph {
     spine
 }
 
+/// Fold the per-window semantic fragments onto the spine (ADR-00017, whole-document
+/// extraction): canonicalize each fragment's entity ids so the **same entity across
+/// windows collapses to one node** under merge, merge it in, then prune danglers once
+/// at the end. Pure / native-free — the gated chunked driver supplies the fragments
+/// from the model, but this accumulation (the heart of whole-document extraction) is
+/// unit-tested without one.
+pub fn merge_semantic_chunks(mut spine: Graph, fragments: Vec<Graph>) -> Graph {
+    for mut fragment in fragments {
+        doctree_core::canonicalize_semantic_ids(&mut fragment);
+        spine.merge(fragment);
+    }
+    spine.prune_dangling_edges();
+    spine
+}
+
 /// Attach embedding-similarity edges to a graph (B4). Pure: given each node's
 /// embedding vector, derive the [`doctree_core::EdgeKind::SimilarTo`] edges and
 /// append them. The edges only reference ids that came *from* this graph, so the
@@ -315,11 +330,10 @@ pub async fn semantic_build_steps(
     }
     let total = prompts.len();
 
-    // 2. Extract each window on a blocking thread, canonicalize its entity ids so the
-    //    same entity collapses across windows under merge, and merge onto the
-    //    accumulating graph. A window that fails (join error, non-schema JSON) is
-    //    SKIPPED with a log line — one bad chunk never sinks the whole pass.
-    let mut merged = spine;
+    // 2. Extract each window on a blocking thread; collect the parsed fragments.
+    //    A window that fails (join error, non-schema JSON) is SKIPPED with a log line
+    //    — one bad chunk never sinks the whole pass.
+    let mut fragments: Vec<Graph> = Vec::new();
     for (i, prompt) in prompts.into_iter().enumerate() {
         let engine = state.engine.clone();
         let json = match tauri::async_runtime::spawn_blocking(move || extract_blocking(engine, prompt))
@@ -336,10 +350,7 @@ pub async fn semantic_build_steps(
             }
         };
         match serde_json::from_str::<Graph>(&json) {
-            Ok(mut fragment) => {
-                doctree_core::canonicalize_semantic_ids(&mut fragment);
-                merged = merge_semantic_onto_spine(merged, fragment);
-            }
+            Ok(fragment) => fragments.push(fragment),
             Err(e) => {
                 let head: String = json.chars().take(160).collect();
                 eprintln!(
@@ -350,7 +361,9 @@ pub async fn semantic_build_steps(
         }
     }
 
-    // 3. Ordered build steps for the animated hybrid build.
+    // 3. Canonicalize + merge every window's fragment onto the spine (pure, tested),
+    //    then emit the ordered build steps for the animated hybrid build.
+    let merged = merge_semantic_chunks(spine, fragments);
     Ok(build_sequence(&merged))
 }
 
@@ -774,6 +787,45 @@ mod tests {
         assert_eq!(merged.edges.len(), 2);
         assert!(merged.is_valid(), "merged hybrid graph is valid by construction");
         assert!(!merged.edges.iter().any(|e| e.target == "char:ghost"));
+    }
+
+    #[test]
+    fn merge_semantic_chunks_unifies_recurring_entities_across_windows() {
+        // ADR-00017: the per-window fold — the heart of whole-document extraction.
+        // "Kuk Turu" appears in windows 1 and 3 with DIFFERENT minted ids; "Riti"
+        // only in window 2. Result: two distinct characters, Kuk carrying the mention
+        // from each window it appeared in (cross-window unification via canonical ids).
+        use doctree_core::{Edge, EdgeKind, Node, NodeKind, Provenance};
+
+        let mut spine = Graph::new();
+        for i in 1..=3 {
+            spine.push_node(
+                Node::structural(format!("sent:{i}"), NodeKind::Sentence, "x").with_text("x"),
+            );
+        }
+        let window = |nid: &str, label: &str, sent: &str| {
+            let mut g = Graph::new();
+            g.push_node(Node::semantic(nid, NodeKind::Character, label));
+            g.push_edge(Edge::new(sent, nid, EdgeKind::Mentions, Provenance::Semantic));
+            g
+        };
+        let fragments = vec![
+            window("a", "Kuk Turu", "sent:1"),
+            window("r", "Riti", "sent:2"),
+            window("z", "Kuk Turu", "sent:3"),
+        ];
+
+        let merged = merge_semantic_chunks(spine, fragments);
+
+        let chars: Vec<_> = merged.nodes.iter().filter(|n| n.kind == NodeKind::Character).collect();
+        assert_eq!(chars.len(), 2, "Kuk unified across windows 1 & 3; Riti distinct");
+        let kuk_mentions = merged
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Mentions && e.target == "character:kuk-turu")
+            .count();
+        assert_eq!(kuk_mentions, 2, "Kuk carries the mention from each window it appeared in");
+        assert!(merged.is_valid());
     }
 
     #[test]
