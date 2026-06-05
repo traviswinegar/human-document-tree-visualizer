@@ -13,10 +13,13 @@ import {
   loadBuildSource,
   searchByMeaning,
   reconstructDocument,
+  tokenizeDocument,
+  decodeTokens,
   defaultDocument,
   type BuildSource,
   type ResolvedPipeline,
   type ReconstructResult,
+  type TokenizeResult,
 } from "./doc-source";
 import {
   saveDoc,
@@ -79,6 +82,9 @@ const reconstructMetaEl = document.getElementById("reconstruct-meta")!;
 const reconstructDiffEl = document.getElementById("reconstruct-diff")!;
 const reconstructTextEl = document.getElementById("reconstruct-text")!;
 const importInputEl = document.getElementById("import-input") as HTMLInputElement;
+const roundtripEl = document.getElementById("roundtrip") as HTMLButtonElement;
+const importTokensEl = document.getElementById("import-tokens") as HTMLButtonElement;
+const tokensInputEl = document.getElementById("tokens-input") as HTMLInputElement;
 const libraryModalEl = document.getElementById("library-modal")!;
 const libraryBackdropEl = document.getElementById("library-backdrop")!;
 const libraryListEl = document.getElementById("library-list")!;
@@ -1858,6 +1864,86 @@ function renderReconstruct(r: ReconstructResult): void {
   reconstructTextEl.textContent = r.text;
 }
 
+// Phase 10 (ADR-00018) — write the live (document, graph)'s token stream to a real
+// `.dttok.json` file (the artifact under study). Mirrors the Export download pattern.
+function downloadTokensFile(tok: TokenizeResult): void {
+  const name = currentDocName || currentDocLabel?.replace(/\.[^.]+$/, "") || "document";
+  const file = {
+    format: "doctree-tokens/v1",
+    vocabSize: tok.vocabSize,
+    tokens: tok.tokens,
+    docBytes: tok.docBytes,
+    ids: tok.ids,
+  };
+  const blob = new Blob([JSON.stringify(file)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${slugifyName(name)}.dttok.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// The automated round-trip (ADR-00018): tokenize the live pair → write the real
+// `.dttok.json` file → decode that same stream back → diff the original against the
+// recovered document, shown in the Reconstruct modal. One click: the file is produced
+// and the byte-exact verdict + diff prove it round-trips through disk.
+async function doRoundTrip(): Promise<void> {
+  if (graph.graphData().nodes.length === 0) {
+    flashButton(roundtripEl, "nothing yet", "Round-trip");
+    return;
+  }
+  roundtripEl.disabled = true;
+  try {
+    const snap = snapshotGraph();
+    const tok = await tokenizeDocument(currentText, { nodes: snap.nodes, edges: snap.edges });
+    downloadTokensFile(tok);
+    const decoded = await decodeTokens(tok.ids);
+    const result: ReconstructResult = {
+      text: decoded.text,
+      byteExact: decoded.text === currentText,
+      tokens: tok.tokens,
+      docBytes: tok.docBytes,
+      vocabSize: tok.vocabSize,
+    };
+    renderReconstruct(result);
+    openReconstructModal();
+    flashButton(roundtripEl, "round-tripped ✓", "Round-trip");
+  } catch (err) {
+    console.error("round-trip failed:", err);
+    flashButton(roundtripEl, "failed", "Round-trip");
+  } finally {
+    roundtripEl.disabled = false;
+  }
+}
+
+// Import a `.dttok.json` token file: decode its stream back to the byte-exact
+// document, then visualize it through the normal open-document path (which walks it
+// into a tree and lays it out). Proves "tokenized file → tree/doc" (ADR-00018).
+function doImportTokens(): void {
+  tokensInputEl.click();
+}
+async function onTokensFileChosen(): Promise<void> {
+  const file = tokensInputEl.files?.[0];
+  tokensInputEl.value = ""; // let the same file be re-imported
+  if (!file) return;
+  try {
+    const parsed = JSON.parse(await file.text()) as { ids?: number[] };
+    if (!Array.isArray(parsed.ids)) {
+      throw new Error("not a .dttok file (missing `ids` array)");
+    }
+    const decoded = await decodeTokens(parsed.ids);
+    const label = file.name.replace(/\.dttok\.json$/i, "").replace(/\.json$/i, "");
+    await loadAndBuild(decoded.text, label);
+    flashButton(importTokensEl, "imported ✓", "Import tokens");
+  } catch (err) {
+    console.error("import tokens failed:", err);
+    flashButton(importTokensEl, "bad file", "Import tokens");
+  }
+}
+
 // Restore a saved graph into the scene with no re-walk and no re-simulation: feed
 // the stored nodes/edges straight in, seed each node's saved position, and freeze
 // the force sim (cooldownTicks 0) so the layout lands exactly as saved. Switching
@@ -2140,6 +2226,9 @@ importInputEl.addEventListener("change", () => {
   importInputEl.value = ""; // let the same file be re-imported
 });
 reconstructEl.addEventListener("click", () => void doReconstruct());
+roundtripEl.addEventListener("click", () => void doRoundTrip());
+importTokensEl.addEventListener("click", () => doImportTokens());
+tokensInputEl.addEventListener("change", () => void onTokensFileChosen());
 reconstructCloseEl.addEventListener("click", () => closeReconstructModal());
 reconstructBackdropEl.addEventListener("click", () => closeReconstructModal());
 libraryCloseEl.addEventListener("click", () => closeLibrary());

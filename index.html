@@ -1017,6 +1017,8 @@
       <button id="export-doc" type="button" title="Download this graph as a portable .doctree.json">Export</button>
       <button id="import-doc" type="button" title="Import a .doctree.json graph file">Import</button>
       <button id="reconstruct" type="button" title="Reconstruct the original document from the graph via the reversible tokenizer">Reconstruct</button>
+      <button id="roundtrip" type="button" title="Round-trip: tokenize to a .dttok.json file, decode it back, and diff vs the original document (ADR-00018)">Round-trip</button>
+      <button id="import-tokens" type="button" title="Import a .dttok.json token file and rebuild the tree/document from it">Import tokens</button>
       <button id="open-doc" type="button">Open document</button>
       <button id="reset" type="button">Reset view</button>
     </div>
@@ -1030,6 +1032,12 @@
       id="import-input"
       type="file"
       accept=".json,.doctree.json,application/json"
+      hidden
+    />
+    <input
+      id="tokens-input"
+      type="file"
+      accept=".json,.dttok.json,application/json"
       hidden
     />
     <div id="playback">
