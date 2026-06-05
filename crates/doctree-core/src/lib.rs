@@ -23,7 +23,9 @@ pub use grammar::{graph_grammar, lint_gbnf, GRAPH_GBNF};
 pub use metrics::{
     compare_pipelines, graph_metrics, GraphMetrics, PipelineComparison, PipelineRun,
 };
-pub use schema::{Edge, EdgeKind, Graph, Node, NodeKind, Provenance, Span};
+pub use schema::{
+    canonicalize_semantic_ids, Edge, EdgeKind, Graph, Node, NodeKind, Provenance, Span,
+};
 pub use tokenizer::{
     decode_graph, decode_text, encode, stats as token_stats, TokenStats, TokenizeError, Tokens,
     VOCAB_SIZE,

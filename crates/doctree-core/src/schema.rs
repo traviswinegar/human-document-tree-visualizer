@@ -364,6 +364,61 @@ impl Graph {
     }
 }
 
+/// Rewrite each **semantic** node's id to a deterministic `slug(kind, label)`
+/// (kind-prefixed), and rewrite edge endpoints to match, so the SAME entity extracted
+/// in different chunks collapses to one node under [`Graph::merge`] (ADR-00017).
+///
+/// Only the six semantic kinds are touched — structural (spine) ids are left alone,
+/// and a kind-prefixed canonical id (`character:…`) never collides with a spine id
+/// (`sec:`/`para:`/`sent:`/…). Idempotent: a node already at its canonical id is left
+/// as-is. Native-free pure logic, so it is unit-tested with no model.
+pub fn canonicalize_semantic_ids(graph: &mut Graph) {
+    use std::collections::HashMap;
+    let mut remap: HashMap<String, String> = HashMap::new();
+    for node in &mut graph.nodes {
+        if node.kind.is_semantic() {
+            let canon = format!("{}:{}", node.kind.tag(), slugify_label(&node.label));
+            if node.id != canon {
+                remap.insert(node.id.clone(), canon.clone());
+                node.id = canon;
+            }
+        }
+    }
+    if remap.is_empty() {
+        return;
+    }
+    for edge in &mut graph.edges {
+        if let Some(c) = remap.get(&edge.source) {
+            edge.source = c.clone();
+        }
+        if let Some(c) = remap.get(&edge.target) {
+            edge.target = c.clone();
+        }
+    }
+}
+
+/// A short, deterministic slug of an entity label: lowercase, runs of non-alphanumeric
+/// collapsed to a single `-`, trimmed. An empty/symbol-only label yields `unnamed`.
+fn slugify_label(label: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in label.chars() {
+        if ch.is_alphanumeric() {
+            out.extend(ch.to_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "unnamed".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,6 +580,54 @@ mod tests {
         let liz = spine.nodes.iter().find(|n| n.id == "char:elizabeth").unwrap();
         assert_eq!(liz.kind, NodeKind::Term, "existing spine node wins");
         assert_eq!(spine.edges.len(), 1);
+        assert!(spine.is_valid());
+    }
+
+    #[test]
+    fn canonicalize_unifies_same_entity_across_fragments_under_merge() {
+        // ADR-00017 M2: two independent chunks naming the same entity with DIFFERENT
+        // minted ids must collapse to one node (union of edges) after canonicalize+merge.
+        let mut spine = Graph::new();
+        spine.push_node(
+            Node::structural("sent:1", NodeKind::Sentence, "Kuk met Riti.").with_text("Kuk met Riti."),
+        );
+        spine.push_node(
+            Node::structural("sent:2", NodeKind::Sentence, "Kuk fled.").with_text("Kuk fled."),
+        );
+
+        // Chunk A: character minted as "c1", mentioned by sent:1.
+        let mut frag_a = Graph::new();
+        frag_a.push_node(Node::semantic("c1", NodeKind::Character, "Kuk Turu"));
+        frag_a.push_edge(Edge::new("sent:1", "c1", EdgeKind::Mentions, Provenance::Semantic));
+        canonicalize_semantic_ids(&mut frag_a);
+
+        // Chunk B: SAME character, different minted id "kuk", mentioned by sent:2.
+        let mut frag_b = Graph::new();
+        frag_b.push_node(Node::semantic("kuk", NodeKind::Character, "Kuk Turu"));
+        frag_b.push_edge(Edge::new("sent:2", "kuk", EdgeKind::Mentions, Provenance::Semantic));
+        canonicalize_semantic_ids(&mut frag_b);
+
+        let canon = "character:kuk-turu";
+        assert!(frag_a.nodes.iter().any(|n| n.id == canon));
+        assert!(frag_b.nodes.iter().any(|n| n.id == canon));
+
+        spine.merge(frag_a);
+        spine.merge(frag_b);
+
+        let chars: Vec<_> = spine.nodes.iter().filter(|n| n.kind == NodeKind::Character).collect();
+        assert_eq!(chars.len(), 1, "same entity collapses to one node across chunks");
+        assert_eq!(chars[0].id, canon);
+        let mentions: Vec<String> = spine
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Mentions && e.target == canon)
+            .map(|e| e.source.clone())
+            .collect();
+        assert!(
+            mentions.contains(&"sent:1".to_string()) && mentions.contains(&"sent:2".to_string()),
+            "edges from both chunks are unioned onto the one entity: {mentions:?}"
+        );
+        assert!(spine.nodes.iter().any(|n| n.id == "sent:1"), "spine ids untouched");
         assert!(spine.is_valid());
     }
 

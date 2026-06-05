@@ -88,34 +88,99 @@ pub const PROMPT_DOC_BUDGET_BYTES: usize =
 /// it cures the "0 output bytes" stall (the model could otherwise satisfy the old
 /// `root ::= ws graph ws` grammar by emitting newlines until the budget ran out).
 pub fn build_extraction_prompt(spine: &doctree_core::Graph) -> String {
-    use doctree_core::NodeKind;
+    let anchors = anchored_nodes(spine);
+    let mut taken: Vec<Anchor> = Vec::new();
+    let mut bytes = 0usize;
+    let mut truncated = false;
+    for a in anchors {
+        let line_len = anchor_line(&a).len();
+        if bytes + line_len > PROMPT_DOC_BUDGET_BYTES {
+            truncated = true;
+            break;
+        }
+        bytes += line_len;
+        taken.push(a);
+    }
+    build_prompt_from_anchors(&taken, truncated)
+}
 
-    // Anchorable nodes are the ones the walker gives real text + a span:
-    // sections (headings) and sentences. They tile the document in order.
-    let mut anchored: Vec<(usize, &str, &str)> = spine
+/// One anchorable spine node: the walker gives Sections (headings) and Sentences real
+/// text + a span, so they tile the document in order. `text` is pre-normalized
+/// (internal whitespace collapsed) so [`chunk_spine`]'s byte accounting matches the
+/// body line exactly.
+struct Anchor {
+    start: usize,
+    id: String,
+    text: String,
+}
+
+/// The anchorable nodes of a spine, in document order.
+fn anchored_nodes(spine: &doctree_core::Graph) -> Vec<Anchor> {
+    use doctree_core::NodeKind;
+    let mut anchored: Vec<Anchor> = spine
         .nodes
         .iter()
         .filter(|n| matches!(n.kind, NodeKind::Section | NodeKind::Sentence))
         .filter_map(|n| {
             let text = n.text.as_deref()?;
-            let start = n.span.map(|s| s.start).unwrap_or(usize::MAX);
-            Some((start, n.id.as_str(), text))
+            Some(Anchor {
+                start: n.span.map(|s| s.start).unwrap_or(usize::MAX),
+                id: n.id.clone(),
+                // Collapse internal whitespace so the [id] prefix stays meaningful
+                // and the model reads one unit per line.
+                text: text.split_whitespace().collect::<Vec<_>>().join(" "),
+            })
         })
         .collect();
-    anchored.sort_by_key(|(start, _, _)| *start);
+    anchored.sort_by_key(|a| a.start);
+    anchored
+}
 
-    let mut body = String::new();
-    let mut truncated = false;
-    for (_, id, text) in &anchored {
-        // One line per anchor; collapse internal newlines so the [id] prefix
-        // stays meaningful and the model reads one unit per line.
-        let line_text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let line = format!("[{id}] {line_text}\n");
-        if body.len() + line.len() > PROMPT_DOC_BUDGET_BYTES {
-            truncated = true;
-            break;
+/// One body line for an anchor: `[id] text\n`. Its byte length is what the chunker
+/// budgets against (and what [`build_prompt_from_anchors`] emits), so the two agree.
+fn anchor_line(a: &Anchor) -> String {
+    format!("[{}] {}\n", a.id, a.text)
+}
+
+/// Partition the spine's anchorable nodes, in document order, into contiguous windows
+/// each whose body fits `PROMPT_DOC_BUDGET_BYTES`. Every anchor lands in exactly one
+/// window, in order — no gap, no overlap (ADR-00017). A single oversized anchor
+/// becomes its own window rather than being dropped.
+fn chunk_anchors(spine: &doctree_core::Graph) -> Vec<Vec<Anchor>> {
+    let mut chunks: Vec<Vec<Anchor>> = Vec::new();
+    let mut cur: Vec<Anchor> = Vec::new();
+    let mut bytes = 0usize;
+    for a in anchored_nodes(spine) {
+        let line_len = anchor_line(&a).len();
+        if bytes + line_len > PROMPT_DOC_BUDGET_BYTES && !cur.is_empty() {
+            chunks.push(std::mem::take(&mut cur));
+            bytes = 0;
         }
-        body.push_str(&line);
+        bytes += line_len;
+        cur.push(a);
+    }
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
+    chunks
+}
+
+/// Whole-document extraction prompts (ADR-00017): one batch-safe prompt per window of
+/// the spine, covering the entire document in order. [`build_extraction_prompt`] is
+/// the first of these (the opening); this is all of them.
+pub fn chunk_spine(spine: &doctree_core::Graph) -> Vec<String> {
+    chunk_anchors(spine)
+        .iter()
+        .map(|c| build_prompt_from_anchors(c, false))
+        .collect()
+}
+
+/// Wrap a set of anchors (the DOCUMENT body) in the ChatML extraction prompt.
+/// `truncated` appends the truncation marker (the single-prompt path only).
+fn build_prompt_from_anchors(anchors: &[Anchor], truncated: bool) -> String {
+    let mut body = String::new();
+    for a in anchors {
+        body.push_str(&anchor_line(a));
     }
     if truncated {
         body.push_str("[...document truncated...]\n");
@@ -1262,6 +1327,53 @@ mod tests {
             p.len(),
             PROMPT_MAX_TOTAL_BYTES,
             PROMPT_BATCH_TOKEN_CEILING
+        );
+    }
+
+    #[test]
+    fn chunk_spine_partitions_all_anchors_in_order_within_budget() {
+        // ADR-00017 M1: the chunker must split a large doc into batch-safe windows
+        // that together cover EVERY anchor exactly once, in document order.
+        use doctree_core::{Graph, Node, NodeKind, Span};
+        let mut spine = Graph::new();
+        for i in 0..600 {
+            let text = format!("Sentence number {i} carries a fair amount of filler text.");
+            let start = i * 60;
+            spine.push_node(
+                Node::structural(format!("sent:{i}"), NodeKind::Sentence, text.clone())
+                    .with_text(text)
+                    .with_span(Span::new(start, start + 58)),
+            );
+        }
+        let all_ids: Vec<String> = anchored_nodes(&spine).iter().map(|a| a.id.clone()).collect();
+        assert_eq!(all_ids.len(), 600);
+
+        let chunks = chunk_anchors(&spine);
+        assert!(chunks.len() >= 2, "a large doc must split into multiple chunks, got {}", chunks.len());
+
+        // Partition: the chunks' ids, concatenated, equal all anchors — once, in order.
+        let flat: Vec<String> = chunks.iter().flatten().map(|a| a.id.clone()).collect();
+        assert_eq!(flat, all_ids, "chunks partition the anchors exactly once, in order");
+
+        // Each multi-anchor chunk's body fits the budget (a lone oversized anchor may not).
+        for c in &chunks {
+            let body: usize = c.iter().map(|a| anchor_line(a).len()).sum();
+            if c.len() > 1 {
+                assert!(body <= PROMPT_DOC_BUDGET_BYTES, "chunk body {body} B exceeds budget");
+            }
+        }
+
+        // Deterministic.
+        let again: Vec<usize> = chunk_anchors(&spine).iter().map(|c| c.len()).collect();
+        assert_eq!(again, chunks.iter().map(|c| c.len()).collect::<Vec<_>>());
+
+        // chunk_spine yields one batch-safe ChatML prompt per chunk.
+        let prompts = chunk_spine(&spine);
+        assert_eq!(prompts.len(), chunks.len());
+        assert!(prompts.iter().all(|p| p.contains("<|im_start|>assistant")));
+        assert!(
+            prompts.iter().all(|p| p.len() <= PROMPT_MAX_TOTAL_BYTES),
+            "every chunk prompt must fit the batch ceiling"
         );
     }
 
