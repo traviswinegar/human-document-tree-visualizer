@@ -299,31 +299,58 @@ pub async fn semantic_build_steps(
     params: Option<crate::WalkParams>,
     state: tauri::State<'_, LlmState>,
 ) -> Result<Vec<BuildStep>, String> {
-    // 1. Deterministic spine (pure, fast) and the anchored extraction prompt.
+    // 1. Deterministic spine (pure, fast) and the per-window extraction prompts.
+    //    `chunk_spine` covers the WHOLE document in batch-safe windows (ADR-00017),
+    //    not just the opening. `DOCTREE_MAX_CHUNKS` caps how many windows we extract
+    //    to bound interactive latency (default: the whole document).
     let spine = crate::walk_document_impl(&text, params);
-    let prompt = doctree_llm::build_extraction_prompt(&spine);
+    let mut prompts = doctree_llm::chunk_spine(&spine);
+    if let Some(max) = std::env::var("DOCTREE_MAX_CHUNKS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        if max > 0 && prompts.len() > max {
+            prompts.truncate(max);
+        }
+    }
+    let total = prompts.len();
 
-    // 2. Grammar-constrained extraction on a blocking thread.
-    let engine = state.engine.clone();
-    let json = tauri::async_runtime::spawn_blocking(move || extract_blocking(engine, prompt))
-        .await
-        .map_err(|e| format!("extraction task failed to join: {e}"))??;
+    // 2. Extract each window on a blocking thread, canonicalize its entity ids so the
+    //    same entity collapses across windows under merge, and merge onto the
+    //    accumulating graph. A window that fails (join error, non-schema JSON) is
+    //    SKIPPED with a log line — one bad chunk never sinks the whole pass.
+    let mut merged = spine;
+    for (i, prompt) in prompts.into_iter().enumerate() {
+        let engine = state.engine.clone();
+        let json = match tauri::async_runtime::spawn_blocking(move || extract_blocking(engine, prompt))
+            .await
+        {
+            Ok(Ok(json)) => json,
+            Ok(Err(e)) => {
+                eprintln!("[semantic] chunk {}/{total} extraction failed, skipped: {e}", i + 1);
+                continue;
+            }
+            Err(e) => {
+                eprintln!("[semantic] chunk {}/{total} task join failed, skipped: {e}", i + 1);
+                continue;
+            }
+        };
+        match serde_json::from_str::<Graph>(&json) {
+            Ok(mut fragment) => {
+                doctree_core::canonicalize_semantic_ids(&mut fragment);
+                merged = merge_semantic_onto_spine(merged, fragment);
+            }
+            Err(e) => {
+                let head: String = json.chars().take(160).collect();
+                eprintln!(
+                    "[semantic] chunk {}/{total} not schema JSON, skipped ({e}); starts: {head:?}",
+                    i + 1
+                );
+            }
+        }
+    }
 
-    // 3. Parse the fragment, merge onto the spine, prune danglers (all pure).
-    //    On failure, name the serde cause (it carries line:col) plus the output
-    //    size and a debug-escaped head — so a grammar-vs-serde gap (e.g. a raw
-    //    control char the grammar once permitted, BUILD_LOG #69) is diagnosable
-    //    from the surfaced error instead of guessed at.
-    let fragment: Graph = serde_json::from_str(&json).map_err(|e| {
-        let head: String = json.chars().take(200).collect();
-        format!(
-            "LLM output was not schema JSON ({e}); {} bytes, starts: {head:?}",
-            json.len()
-        )
-    })?;
-    let merged = merge_semantic_onto_spine(spine, fragment);
-
-    // 4. Ordered build steps for the animated hybrid build.
+    // 3. Ordered build steps for the animated hybrid build.
     Ok(build_sequence(&merged))
 }
 
