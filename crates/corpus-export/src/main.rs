@@ -211,6 +211,42 @@ fn encode_arm_d_coref(text: &str, graph: &Graph) -> (Vec<u16>, Vec<u8>) {
     (ids, is_body)
 }
 
+/// The salient-term graph of a document — the **ground truth** for the (b) downstream
+/// text→graph task (Phase 11 / ADR-00019). `nodes` = salient `Term` labels; `edges` =
+/// unordered `CoOccursWith` pairs (term↔term). Bounded + deterministic, so a tiny model
+/// has a tractable target; serialized compact, one line per doc, matching the Python
+/// `graphmatch.parse_term_graph` shape `{"nodes":[str], "edges":[[a,b]]}`.
+#[derive(Serialize)]
+struct TermGraph {
+    nodes: Vec<String>,
+    edges: Vec<[String; 2]>,
+}
+
+fn term_graph_of(graph: &Graph) -> TermGraph {
+    let mut nodes: Vec<String> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Term)
+        .map(|n| n.label.clone())
+        .collect();
+    nodes.sort();
+    nodes.dedup();
+    let mut edges: Vec<[String; 2]> = Vec::new();
+    for e in &graph.edges {
+        if e.kind == EdgeKind::CoOccursWith {
+            let a = e.source.strip_prefix("term:").unwrap_or(&e.source);
+            let b = e.target.strip_prefix("term:").unwrap_or(&e.target);
+            if a != b {
+                let (x, y) = if a <= b { (a, b) } else { (b, a) };
+                edges.push([x.to_string(), y.to_string()]);
+            }
+        }
+    }
+    edges.sort();
+    edges.dedup();
+    TermGraph { nodes, edges }
+}
+
 #[derive(Serialize)]
 struct DocRecord {
     path: String,
@@ -296,6 +332,7 @@ fn main() -> std::io::Result<()> {
     let mut arm_c_body: Vec<u8> = Vec::new();
     let mut arm_d: Vec<u8> = Vec::new();
     let mut arm_d_body: Vec<u8> = Vec::new();
+    let mut term_graphs = String::new();
     let mut docs: Vec<DocRecord> = Vec::new();
     let mut total_c_tokens = 0usize;
     let mut total_d_tokens = 0usize;
@@ -320,6 +357,9 @@ fn main() -> std::io::Result<()> {
             arm_d.extend_from_slice(&id.to_le_bytes());
         }
         arm_d_body.extend_from_slice(&d_body);
+        // (b) downstream ground truth: this doc's salient-term graph, one JSON line.
+        term_graphs.push_str(&serde_json::to_string(&term_graph_of(&graph)).expect("term graph"));
+        term_graphs.push('\n');
         corpus_txt.push_str(&text);
         total_c_tokens += ids.len();
         total_d_tokens += d_ids.len();
@@ -346,6 +386,7 @@ fn main() -> std::io::Result<()> {
     fs::write(out_dir.join("arm_c.body"), &arm_c_body)?;
     fs::write(out_dir.join("arm_d.u16"), &arm_d)?;
     fs::write(out_dir.join("arm_d.body"), &arm_d_body)?;
+    fs::write(out_dir.join("term_graphs.jsonl"), term_graphs.as_bytes())?;
     fs::write(out_dir.join("corpus.txt"), corpus_txt.as_bytes())?;
     fs::write(
         out_dir.join("manifest.json"),
@@ -495,6 +536,26 @@ mod tests {
             "the recurring entity's SAME slot marks each occurrence (coref recurrence)"
         );
         assert!(count(wizard) >= 2, "the second entity's coref recurrence is also encoded");
+    }
+
+    #[test]
+    fn term_graph_has_nodes_and_cooccurrence_edges() {
+        // Two terms that recur together produce term nodes + an unordered co-occ edge,
+        // labels only (no "term:" prefix), matching the Python scorer's target shape.
+        let doc = "The dragon guards the gold. The dragon hoards the gold. The dragon counts the gold.";
+        let tg = term_graph_of(&walk(doc));
+        assert!(tg.nodes.contains(&"dragon".to_string()));
+        assert!(tg.nodes.contains(&"gold".to_string()));
+        assert!(tg.nodes.iter().all(|n| !n.starts_with("term:")), "labels, not ids");
+        assert!(
+            tg.edges.iter().any(|[a, b]| {
+                (a == "dragon" && b == "gold") || (a == "gold" && b == "dragon")
+            }),
+            "dragon and gold co-occur, so there is an undirected edge: {:?}",
+            tg.edges
+        );
+        // edges are canonical (sorted within the pair: a <= b)
+        assert!(tg.edges.iter().all(|[a, b]| a <= b), "each pair is sorted");
     }
 
     #[test]
