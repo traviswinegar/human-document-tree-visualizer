@@ -23,11 +23,20 @@ from .bpb import bits_per_byte
 from .model import GPT, GPTConfig
 
 
-def get_batch(ids: np.ndarray, block: int, batch: int, device: str):
+def get_batch(ids: np.ndarray, block: int, batch: int, device: str, body: np.ndarray | None = None):
+    """Sample a batch. If `body` (the per-token body mask) is given, also return the
+    mask aligned to the targets `y` so the training loss can be restricted to body
+    (text) positions — markers (mask 0) are conditioning context, never predicted. The
+    `torch.randint` draw is identical whether or not `body` is passed, so an arm's data
+    sampling is unchanged by enabling masking."""
     ix = torch.randint(len(ids) - block - 1, (batch,))
     x = torch.stack([torch.from_numpy(ids[i : i + block].astype("int64")) for i in ix])
     y = torch.stack([torch.from_numpy(ids[i + 1 : i + 1 + block].astype("int64")) for i in ix])
-    return x.to(device), y.to(device)
+    m = None
+    if body is not None:
+        m = torch.stack([torch.from_numpy(body[i + 1 : i + 1 + block].astype(bool)) for i in ix])
+        m = m.to(device)
+    return x.to(device), y.to(device), m
 
 
 @torch.no_grad()
@@ -94,6 +103,10 @@ def main() -> int:
 
     torch.manual_seed(args.seed)
     train_ids, val_ids, vocab, val_bytes, val_body = D.build_arm(args.data_dir, args.arm)
+    # Arms C/D: the markers are conditioning context. Mask them from the TRAINING loss
+    # (not just the BPB metric) so the model attends to but never predicts them — the
+    # ADR-00019 (a) "contributes zero to the loss" invariant. None for A/B/industry.
+    train_body, _ = D.train_val_body(args.data_dir, args.arm)
     cfg = GPTConfig(vocab_size=vocab, block_size=args.block, dropout=args.dropout)
     model = GPT(cfg).to(args.device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=0.1)
@@ -112,8 +125,17 @@ def main() -> int:
     best_ckpt = os.path.join(runs, f"arm_{args.arm}_best.pt")
     with open(log_path, "w", encoding="utf-8") as logf:
         for step in range(1, args.steps + 1):
-            x, y = get_batch(train_ids, args.block, args.batch, args.device)
-            _, loss = model(x, y)
+            x, y, m = get_batch(train_ids, args.block, args.batch, args.device, body=train_body)
+            if m is None:
+                _, loss = model(x, y)
+            else:
+                # Per-token loss, then average over body (text) positions only — markers
+                # (m == 0) are conditioning context, excluded from the training gradient.
+                logits, _ = model(x)
+                per = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)), y.reshape(-1), reduction="none"
+                ).view_as(y)
+                loss = (per * m).sum() / m.sum().clamp(min=1)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()

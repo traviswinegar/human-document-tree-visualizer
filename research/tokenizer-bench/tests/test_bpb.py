@@ -12,7 +12,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tokbench.bpb import bits_per_byte, text_bytes_from_ids, text_nats  # noqa: E402
+from tokbench.bpb import (  # noqa: E402
+    bits_per_byte,
+    mean_over_body,
+    text_bytes_from_ids,
+    text_nats,
+)
 
 
 def test_bits_per_byte_basic_and_guard():
@@ -56,6 +61,21 @@ def test_arm_d_coref_markers_contribute_zero_to_bpb():
     assert text_bytes_from_ids(ids, "D") == 3          # the markers are not source bytes
     # so the marker losses (5.0, 7.0) never reach bits-per-byte:
     assert abs(bits_per_byte(6.0, 3) - (6.0 / math.log(2) / 3)) < 1e-12
+
+
+def test_mean_over_body_excludes_markers_from_training_loss():
+    # ADR-00019 (a): markers (is_body == 0) are conditioning context, so the TRAINING
+    # loss averages over body positions only — never trained to predict the markers.
+    per = [1.0, 5.0, 2.0, 7.0, 3.0]         # markers carry the big losses (5.0, 7.0)
+    body = [1, 0, 1, 0, 1]                   # positions 1,3 are markers
+    assert mean_over_body(per, body) == 2.0  # (1.0 + 2.0 + 3.0) / 3
+    # all-body (arms A/B) reduces to the plain mean
+    assert mean_over_body([2.0, 4.0], [1, 1]) == 3.0
+    try:
+        mean_over_body([1.0], [0])
+        raise AssertionError("expected ValueError when no body positions")
+    except ValueError:
+        pass
 
 
 def test_arm_a_bytes_must_be_supplied():

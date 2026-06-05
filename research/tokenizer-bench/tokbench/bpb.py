@@ -51,6 +51,24 @@ def text_nats(per_token_nats: Sequence[float], target_ids: Sequence[int], arm: s
     raise ValueError(f"unknown arm {arm!r} (expected 'A', 'B', 'C', or 'D')")
 
 
+def mean_over_body(per_token_nats: Sequence[float], is_body: Sequence[int]) -> float:
+    """Mean cross-entropy over body (text) positions only — the *training-loss* form of
+    treating the coref/structural markers (`is_body == 0`) as pure conditioning context
+    (ADR-00019 (a): "the conditioning prefix contributes zero to the loss"). The model
+    attends to the markers (they are inputs) but is never trained to predict them. This
+    is the pure reference the torch masked mean in `train.py` mirrors.
+    """
+    num = 0.0
+    den = 0
+    for n, b in zip(per_token_nats, is_body):
+        if b:
+            num += float(n)
+            den += 1
+    if den == 0:
+        raise ValueError("no body positions to average")
+    return num / den
+
+
 def text_bytes_from_ids(target_ids: Iterable[int], arm: str) -> int:
     """Source byte count implied by the ids — valid only for byte-grounded arms.
 

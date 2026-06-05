@@ -136,6 +136,23 @@ _TIKTOKEN_ARMS = {"gpt2": "gpt2", "cl100k": "cl100k_base", "o200k": "o200k_base"
 _HF_ARMS = {"llama": "hf-internal-testing/llama-tokenizer"}
 
 
+def train_val_body(data_dir: str, arm: str):
+    """`(train_body, val_body)` masks aligned to the train/val id splits for arms C/D,
+    else `(None, None)`. The train mask lets the trainer exclude marker positions from
+    the *training* loss (ADR-00019 (a) — markers are conditioning, not targets)."""
+    if arm not in ("C", "D"):
+        return None, None
+    manifest = load_manifest(data_dir)
+    split = split_boundaries(manifest)
+    if arm == "C":
+        body = load_arm_c_body(data_dir)
+        cut = split.train_c_tokens
+    else:
+        body = load_arm_d_body(data_dir)
+        cut = split.train_d_tokens
+    return body[:cut], body[cut:]
+
+
 def build_arm(data_dir: str, arm: str, bpe_vocab: int = 8192):
     """Return `(train_ids, val_ids, vocab_size, val_text_bytes, val_body)` for an arm.
 
