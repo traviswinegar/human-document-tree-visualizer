@@ -46,6 +46,18 @@ def test_arm_c_scores_only_byte_positions():
     assert abs(bits_per_byte(4.0, 2) - (4.0 / math.log(2) / 2)) < 1e-12
 
 
+def test_arm_d_coref_markers_contribute_zero_to_bpb():
+    # ADR-00019 (a) loss-masking invariant: the anonymized coref markers (id >= 256) are
+    # conditioning context only — they must contribute ZERO to both the BPB numerator
+    # (scored nats) and denominator (source bytes). Only the body byte targets count.
+    losses = [1.0, 5.0, 2.0, 7.0, 3.0]      # markers carry the big losses (5.0, 7.0)
+    ids = [65, 256, 66, 319, 67]            # 65,66,67 = bytes; 256,319 = coref slots
+    assert text_nats(losses, ids, "D") == 6.0          # 1.0 + 2.0 + 3.0 only
+    assert text_bytes_from_ids(ids, "D") == 3          # the markers are not source bytes
+    # so the marker losses (5.0, 7.0) never reach bits-per-byte:
+    assert abs(bits_per_byte(6.0, 3) - (6.0 / math.log(2) / 3)) < 1e-12
+
+
 def test_arm_a_bytes_must_be_supplied():
     # Arm A is sub-word: byte count is not derivable from ids.
     try:

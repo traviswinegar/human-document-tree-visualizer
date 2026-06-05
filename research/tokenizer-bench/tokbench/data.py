@@ -26,6 +26,8 @@ class Split:
     val_bytes: int
     train_c_tokens: int
     val_c_tokens: int
+    train_d_tokens: int = 0
+    val_d_tokens: int = 0
 
 
 def load_manifest(data_dir: str) -> dict:
@@ -44,6 +46,9 @@ def split_boundaries(manifest: dict) -> Split:
         val_bytes=sum(d["bytes"] for d in val),
         train_c_tokens=sum(d["c_tokens"] for d in train),
         val_c_tokens=sum(d["c_tokens"] for d in val),
+        # arm-D token counts (anonymized coref); 0 for older manifests without the field.
+        train_d_tokens=sum(d.get("d_tokens", 0) for d in train),
+        val_d_tokens=sum(d.get("d_tokens", 0) for d in val),
     )
 
 
@@ -55,6 +60,16 @@ def load_arm_c(data_dir: str) -> np.ndarray:
 def load_arm_c_body(data_dir: str) -> np.ndarray:
     """Arm-C-lite body mask (u8: 1 = document body byte scored for BPB, 0 = marker)."""
     return np.fromfile(os.path.join(data_dir, "arm_c.body"), dtype=np.uint8)
+
+
+def load_arm_d(data_dir: str) -> np.ndarray:
+    """Arm-D (anonymized coref) token ids (little-endian u16), concatenated in order."""
+    return np.fromfile(os.path.join(data_dir, "arm_d.u16"), dtype="<u2")
+
+
+def load_arm_d_body(data_dir: str) -> np.ndarray:
+    """Arm-D body mask (u8: 1 = document body byte scored for BPB, 0 = coref marker)."""
+    return np.fromfile(os.path.join(data_dir, "arm_d.body"), dtype=np.uint8)
 
 
 def load_text_bytes(data_dir: str) -> bytes:
@@ -140,6 +155,11 @@ def build_arm(data_dir: str, arm: str, bpe_vocab: int = 8192):
         body = load_arm_c_body(data_dir)
         cut = split.train_c_tokens
         return ids[:cut], ids[cut:], int(manifest["vocab_size_arm_c"]), split.val_bytes, body[cut:]
+    if arm == "D":
+        ids = load_arm_d(data_dir)
+        body = load_arm_d_body(data_dir)
+        cut = split.train_d_tokens
+        return ids[:cut], ids[cut:], int(manifest["vocab_size_arm_d"]), split.val_bytes, body[cut:]
     if arm == "A":
         train_text = text[: split.train_bytes].decode("utf-8", errors="replace")
         val_text = text[split.train_bytes :].decode("utf-8", errors="replace")

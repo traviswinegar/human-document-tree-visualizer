@@ -41,22 +41,23 @@ def bits_per_byte(scored_nats: float, text_bytes: int) -> float:
 def text_nats(per_token_nats: Sequence[float], target_ids: Sequence[int], arm: str) -> float:
     """Sum the cross-entropy (nats) over the positions that represent *text*.
 
-    arm "C": only byte-token targets (id < 256); arms "A"/"B": every target.
+    arms "C"/"D": only byte-token targets (id < 256) — the structural/coref markers
+    (id >= 256) are conditioning context, never scored; arms "A"/"B": every target.
     """
-    if arm == "C":
+    if arm in ("C", "D"):
         return float(sum(n for n, t in zip(per_token_nats, target_ids) if t < BYTE_CEIL))
     if arm in ("A", "B"):
         return float(sum(per_token_nats))
-    raise ValueError(f"unknown arm {arm!r} (expected 'A', 'B', or 'C')")
+    raise ValueError(f"unknown arm {arm!r} (expected 'A', 'B', 'C', or 'D')")
 
 
 def text_bytes_from_ids(target_ids: Iterable[int], arm: str) -> int:
     """Source byte count implied by the ids — valid only for byte-grounded arms.
 
-    arm "B": one byte per token; arm "C": one byte per byte-token (id < 256). Arm "A"
-    is sub-word and not byte-derivable — pass the true source byte count instead.
+    arm "B": one byte per token; arms "C"/"D": one byte per byte-token (id < 256). Arm
+    "A" is sub-word and not byte-derivable — pass the true source byte count instead.
     """
-    if arm == "C":
+    if arm in ("C", "D"):
         return sum(1 for t in target_ids if t < BYTE_CEIL)
     if arm == "B":
         return sum(1 for _ in target_ids)

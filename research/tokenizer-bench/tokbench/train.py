@@ -34,11 +34,11 @@ def get_batch(ids: np.ndarray, block: int, batch: int, device: str):
 def eval_arm(model, val_ids, arm: str, val_bytes: int, block: int, device: str,
              val_body=None, eval_batch: int = 64):
     """Full-coverage batched val eval: every target in [1, len) scored exactly once.
-    Returns (bits_per_byte, mean_val_loss). For arm C only the *document body* targets
-    (`val_body == 1`) count toward BPB — the structural markers are context, never
-    scored, so no marker/label text is credited. The denominator is the true
-    source-byte count (`val_bytes`) for every arm — what makes the vocabularies
-    comparable."""
+    Returns (bits_per_byte, mean_val_loss). For arms C and D only the *document body*
+    targets (`val_body == 1`) count toward BPB — the structural boundaries (C) / coref
+    markers (D) are conditioning context, never scored, so no marker text is credited.
+    The denominator is the true source-byte count (`val_bytes`) for every arm — what
+    makes the vocabularies comparable."""
     model.eval()
     n = len(val_ids)
     starts = list(range(0, n - 1, block))
@@ -58,7 +58,7 @@ def eval_arm(model, val_ids, arm: str, val_bytes: int, block: int, device: str,
             keep[j, :ln] = True
             textm[j, :ln] = (
                 torch.from_numpy(val_body[s + 1 : e + 1].astype(bool))
-                if arm == "C"
+                if arm in ("C", "D")
                 else True
             )
         xs, ys = xs.to(device), ys.to(device)
@@ -78,7 +78,7 @@ def eval_arm(model, val_ids, arm: str, val_bytes: int, block: int, device: str,
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("data_dir")
-    ap.add_argument("arm", choices=["A", "B", "C", "gpt2", "cl100k", "o200k", "llama"])
+    ap.add_argument("arm", choices=["A", "B", "C", "D", "gpt2", "cl100k", "o200k", "llama"])
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--block", type=int, default=256)
