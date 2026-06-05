@@ -21,6 +21,7 @@ import {
   type ReconstructResult,
   type TokenizeResult,
 } from "./doc-source";
+import { createTwoFilesPatch } from "diff";
 import {
   saveDoc,
   listDocs,
@@ -1753,97 +1754,45 @@ async function doReconstruct(): Promise<void> {
   }
 }
 
-// Phase 7 #7 — a data-level diff of the reconstruction against the original.
-// ADR-00013 makes `decode_text(encode(doc, graph)) == doc` byte-exact *by
-// construction* (the 0..=255 byte floor), so on the happy path this proves
-// losslessness: zero differing bytes. It earns its keep when the input graph is
-// NOT pristine walker output (a hand-built / imported graph, or any future lossy
-// mode) — it pinpoints the first diverging byte offset and shows a hex+printable
-// window around it. We diff UTF-8 *bytes* (not UTF-16 code units), so "identical"
-// means byte-exact in the same sense as the engine's verdict.
-interface ByteDiff {
-  identical: boolean;
-  origBytes: number;
-  reconBytes: number;
-  differingBytes: number; // mismatches over the overlap + the length delta
-  firstDiff: number; // byte offset of first divergence, or -1 when identical
-  orig: Uint8Array;
-  recon: Uint8Array;
-}
-function computeByteDiff(original: string, reconstructed: string): ByteDiff {
-  const enc = new TextEncoder();
-  const orig = enc.encode(original);
-  const recon = enc.encode(reconstructed);
-  const overlap = Math.min(orig.length, recon.length);
-  let firstDiff = -1;
-  let differingBytes = 0;
-  for (let i = 0; i < overlap; i++) {
-    if (orig[i] !== recon[i]) {
-      if (firstDiff === -1) firstDiff = i;
-      differingBytes++;
-    }
-  }
-  if (orig.length !== recon.length) {
-    if (firstDiff === -1) firstDiff = overlap; // one is a strict prefix of the other
-    differingBytes += Math.abs(orig.length - recon.length);
-  }
-  return {
-    identical: differingBytes === 0,
-    origBytes: orig.length,
-    reconBytes: recon.length,
-    differingBytes,
-    firstDiff,
-    orig,
-    recon,
-  };
-}
-
-// A small hex + printable window of `bytes` centered on `center`, for showing
-// where two byte streams first diverge (non-printables shown as ·).
-function byteWindow(
-  bytes: Uint8Array,
-  center: number,
-  radius = 24
-): { hex: string; ascii: string; from: number } {
-  const from = Math.max(0, center - radius);
-  const to = Math.min(bytes.length, center + radius);
-  const slice = bytes.subarray(from, to);
-  const hex = Array.from(slice, (b) => b.toString(16).padStart(2, "0")).join(" ");
-  const ascii = Array.from(slice, (b) =>
-    b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : "·"
-  ).join("");
-  return { hex, ascii, from };
-}
-
-// Paint the diff section: a green "identical" verdict + byte count on the happy
-// path, or a red mismatch summary (counts, first divergence offset, and the
-// hex/printable window on each side) otherwise. The independent JS byte-diff
-// should agree with the engine's `byteExact`; a disagreement is itself a finding.
+// A proper, **aligned line-by-line diff** of the reconstruction against the
+// original (replaces the old positional byte compare, which had no alignment — a
+// single inserted line cascaded into "everything after differs"). The engine's
+// `byteExact` (a strict full comparison) is the authoritative "identical?" verdict;
+// this renders the human-readable view of WHAT changed when it isn't. ADR-00013
+// makes a clean round-trip byte-exact by construction, so the happy path is
+// "identical ✓"; a hand-built / imported / corrupted stream shows a real unified
+// diff. Uses jsdiff's `createTwoFilesPatch` (an LCS diff), so a 1-line insertion is
+// one `+` line — not a cascade.
 function renderReconstructDiff(original: string, r: ReconstructResult): void {
-  const d = computeByteDiff(original, r.text);
-  const agree = d.identical === r.byteExact;
-  const disagreeNote = agree
-    ? ""
-    : `<div class="rc-diff">⚠ this byte-diff disagrees with the engine's byte-exact verdict — investigate.</div>`;
-  if (d.identical) {
+  if (r.byteExact) {
     reconstructDiffEl.innerHTML =
       `<div class="rc-diff-head rc-same">diff vs original · identical ✓</div>` +
-      `<div class="rc-row"><span class="k">differing bytes</span><span class="v">0</span> · ` +
-      `<span class="k">bytes</span><span class="v">${d.origBytes.toLocaleString()}</span></div>` +
-      `<div class="rc-row">lossless round-trip verified — the token stream reproduced the document exactly.</div>` +
-      disagreeNote;
+      `<div class="rc-row">lossless round-trip verified — line-for-line, the recovered document matches the original.</div>`;
     return;
   }
-  const ow = byteWindow(d.orig, d.firstDiff);
-  const rw = byteWindow(d.recon, d.firstDiff);
+  const patch = createTwoFilesPatch("original", "reconstructed", original, r.text, "", "", {
+    context: 3,
+  });
+  let added = 0;
+  let removed = 0;
+  const rows = patch.split("\n").map((ln) => {
+    if (ln.startsWith("+++") || ln.startsWith("---") || ln.startsWith("====")) {
+      return ""; // file-header noise — the sides are named in the heading
+    }
+    if (ln.startsWith("+")) {
+      added++;
+      return `<div class="rc-add">${esc(ln) || "&nbsp;"}</div>`;
+    }
+    if (ln.startsWith("-")) {
+      removed++;
+      return `<div class="rc-del">${esc(ln) || "&nbsp;"}</div>`;
+    }
+    if (ln.startsWith("@@")) return `<div class="rc-hunk">${esc(ln)}</div>`;
+    return `<div class="rc-ctx">${esc(ln) || "&nbsp;"}</div>`;
+  });
   reconstructDiffEl.innerHTML =
-    `<div class="rc-diff-head rc-diff">diff vs original · ${d.differingBytes.toLocaleString()} differing byte(s) ✗</div>` +
-    `<div class="rc-row"><span class="k">original</span><span class="v">${d.origBytes.toLocaleString()} B</span> · ` +
-    `<span class="k">reconstructed</span><span class="v">${d.reconBytes.toLocaleString()} B</span> · ` +
-    `<span class="k">first divergence @ byte</span><span class="v">${d.firstDiff.toLocaleString()}</span></div>` +
-    `<div class="rc-window"><span class="lbl">original  @${ow.from}:</span> ${esc(ow.ascii)}\n<span class="hex">${ow.hex}</span></div>` +
-    `<div class="rc-window"><span class="lbl">recon     @${rw.from}:</span> ${esc(rw.ascii)}\n<span class="hex">${rw.hex}</span></div>` +
-    disagreeNote;
+    `<div class="rc-diff-head rc-diff">diff vs original · +${added} / −${removed} line(s) ✗</div>` +
+    `<div class="rc-patch">${rows.join("")}</div>`;
 }
 
 // Paint the reconstruct result into the modal: a byte-exact verdict pill, the
