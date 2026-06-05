@@ -636,8 +636,35 @@
         align-items: center;
         justify-content: center;
       }
+      /* The reconstruct modal reuses the .lib-* classes but the chrome is scoped to
+         #library-modal, so give it the same opaque panel + dimmed backdrop here
+         (otherwise the content floats over the 3D graph). */
+      #reconstruct-modal .lib-backdrop {
+        position: absolute;
+        inset: 0;
+        background: rgba(5, 7, 13, 0.66);
+        backdrop-filter: blur(3px);
+        -webkit-backdrop-filter: blur(3px);
+      }
       #reconstruct-modal .lib-panel {
+        position: relative;
         width: min(720px, calc(100vw - 48px));
+        max-height: min(84vh, 780px);
+        display: flex;
+        flex-direction: column;
+        background: rgba(11, 16, 28, 0.98);
+        border: 1px solid #26334d;
+        border-radius: 12px;
+        box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+        color: #cfe3ff;
+        overflow: hidden;
+      }
+      #reconstruct-modal .lib-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 16px;
+        border-bottom: 1px solid #1d2740;
       }
       #reconstruct-meta {
         padding: 10px 16px;
