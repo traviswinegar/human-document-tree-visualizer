@@ -97,8 +97,16 @@ def main() -> int:
     # (cl100k ~100k, o200k ~200k) make the logits tensor huge, so a big eval batch OOMs.
     ap.add_argument("--eval-batch", type=int, default=16)
     ap.add_argument("--dropout", type=float, default=0.0)
+    # Model size — flags so the (c) scale milestone (ADR-00019) can grow capacity while
+    # keeping the architecture identical across arms. Defaults = the M2/M3 small model.
+    ap.add_argument("--n-layer", type=int, default=4)
+    ap.add_argument("--n-head", type=int, default=4)
+    ap.add_argument("--n-embd", type=int, default=256)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=1337)
+    # Optional run-file suffix so a scale run (`--tag _scale`) doesn't clobber the small
+    # run's `runs/arm_<X>.jsonl` / `_best.pt`.
+    ap.add_argument("--tag", default="")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -107,7 +115,14 @@ def main() -> int:
     # (not just the BPB metric) so the model attends to but never predicts them — the
     # ADR-00019 (a) "contributes zero to the loss" invariant. None for A/B/industry.
     train_body, _ = D.train_val_body(args.data_dir, args.arm)
-    cfg = GPTConfig(vocab_size=vocab, block_size=args.block, dropout=args.dropout)
+    cfg = GPTConfig(
+        vocab_size=vocab,
+        block_size=args.block,
+        n_layer=args.n_layer,
+        n_head=args.n_head,
+        n_embd=args.n_embd,
+        dropout=args.dropout,
+    )
     model = GPT(cfg).to(args.device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=0.1)
 
@@ -119,10 +134,10 @@ def main() -> int:
         f"device {args.device}"
     )
 
-    log_path = os.path.join(runs, f"arm_{args.arm}.jsonl")
+    log_path = os.path.join(runs, f"arm_{args.arm}{args.tag}.jsonl")
     best_bpb = float("inf")
     best_step = 0
-    best_ckpt = os.path.join(runs, f"arm_{args.arm}_best.pt")
+    best_ckpt = os.path.join(runs, f"arm_{args.arm}{args.tag}_best.pt")
     with open(log_path, "w", encoding="utf-8") as logf:
         for step in range(1, args.steps + 1):
             x, y, m = get_batch(train_ids, args.block, args.batch, args.device, body=train_body)
